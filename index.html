@@ -65,6 +65,7 @@ button:disabled{opacity:.5}
       <option value="Llama-3.2-3B-Instruct">Llama 3.2 — 3 Md (meilleur, plus lent)</option>
       <option value="Phi-3.5-mini-instruct">Phi 3.5 mini — 3,8 Md (le plus capable, lourd)</option>
     </select>
+    <div class="row" style="margin-top:10px"><input type="checkbox" id="f32"><span>Forcer f32 (si le chargement échoue)</span></div>
     <label>Instructions système</label>
     <textarea id="system"></textarea>
     <div class="row" style="margin-top:10px"><input type="checkbox" id="auto"><span>Démarrer automatiquement à l'ouverture de la page</span></div>
@@ -139,19 +140,36 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 document.addEventListener('click', keepAwake);
 
 /* ---------- modèle ---------- */
-async function loadModel(){
+let loading = null;
+function loadModel(){
+  if (engine) return Promise.resolve();
+  if (!loading) loading = doLoad().finally(() => { loading = null; });
+  return loading;
+}
+async function doLoad(){
   if (!navigator.gpu) throw new Error("WebGPU indisponible dans ce navigateur (utilise Safari avec le réglage activé).");
   const adapter = await navigator.gpu.requestAdapter();
-  const f16 = adapter && adapter.features.has('shader-f16');
+  if (!adapter) throw new Error("Aucun GPU accessible via WebGPU.");
+  const L = adapter.limits, mb = x => Math.round(x / 1048576) + ' Mo';
+  log(`GPU : tampon max ${mb(L.maxBufferSize)}, stockage max ${mb(L.maxStorageBufferBindingSize)}, f16 ${adapter.features.has('shader-f16') ? 'oui' : 'non'}.`);
   if (!cfg.model) cfg.model = $('model').value || 'Qwen2.5-1.5B-Instruct';
+  const f16 = adapter.features.has('shader-f16') && !$('f32').checked;
   const id = cfg.model + (f16 ? '-q4f16_1-MLC' : '-q4f32_1-MLC');
   setState('dModel','sModel','chargement…','warn');
   log('Chargement de ' + id + ' (le premier téléchargement peut prendre plusieurs minutes).');
-  engine = await webllm.CreateMLCEngine(id, {
-    initProgressCallback: p => { $('prog').style.width = Math.round((p.progress||0)*100) + '%'; $('progText').textContent = p.text || ''; }
-  });
+  try {
+    const e = await webllm.CreateMLCEngine(id, {
+      initProgressCallback: p => { $('prog').style.width = Math.round((p.progress||0)*100) + '%'; $('progText').textContent = p.text || ''; }
+    });
+    engine = e;
+  } catch (err) {
+    engine = null;
+    setState('dModel','sModel','erreur','err');
+    log('Échec du chargement : ' + (err && (err.stack || err.message) || err), 'err');
+    throw new Error("Le GPU a refusé le modèle. Essaie le modèle 0,5 Md, puis l'option « Forcer f32 ».");
+  }
   $('prog').style.width = '100%'; $('progText').textContent = '';
-  setState('dModel','sModel', cfg.model.split('-Instruct')[0].replace('-instruct',''), 'ok');
+  setState('dModel','sModel', cfg.model.replace(/-[Ii]nstruct$/, ''), 'ok');
   log('Modèle prêt.', 'ok');
 }
 async function ask(messages, max_tokens = 700){
@@ -309,7 +327,8 @@ $('ask').onclick = async () => {
     if (!engine) await loadModel();
     $('reply').textContent = 'Réflexion…';
     const t0 = performance.now();
-    $('reply').textContent = await ask([{ role: 'user', content: q }]);
+    try { $('reply').textContent = await ask([{ role: 'user', content: q }]); }
+    catch (err) { engine = null; setState('dModel','sModel','perdu, recharge','err'); throw err; }
     log(`Test local : ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
   } catch (e) { $('reply').textContent = ''; log(e.message, 'err'); }
 };
