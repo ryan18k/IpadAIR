@@ -143,6 +143,7 @@ async function loadModel(){
   if (!navigator.gpu) throw new Error("WebGPU indisponible dans ce navigateur (utilise Safari avec le réglage activé).");
   const adapter = await navigator.gpu.requestAdapter();
   const f16 = adapter && adapter.features.has('shader-f16');
+  if (!cfg.model) cfg.model = $('model').value || 'Qwen2.5-1.5B-Instruct';
   const id = cfg.model + (f16 ? '-q4f16_1-MLC' : '-q4f32_1-MLC');
   setState('dModel','sModel','chargement…','warn');
   log('Chargement de ' + id + ' (le premier téléchargement peut prendre plusieurs minutes).');
@@ -303,6 +304,7 @@ $('start').onclick = start;
 
 $('ask').onclick = async () => {
   const q = $('q').value.trim(); if (!q) return;
+  saveCfg();
   try {
     if (!engine) await loadModel();
     $('reply').textContent = 'Réflexion…';
