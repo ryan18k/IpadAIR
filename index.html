@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Nœud IA</title>
+<style>
+:root{--bg:#0e1116;--card:#161a21;--line:#262c36;--text:#e6e9ef;--muted:#8b93a1;--ok:#3ecf8e;--warn:#f5a524;--err:#f25f5c;--acc:#6ea8fe}
+*{box-sizing:border-box}
+html,body{background:var(--bg)}
+body{margin:0;color:var(--text);font:15px/1.45 -apple-system,system-ui,sans-serif;padding:16px;max-width:1100px;margin-inline:auto}
+h1{font-size:22px;margin:4px 0 2px}
+.sub{color:var(--muted);margin:0 0 16px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:760px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 10px}
+label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+input,select,textarea{width:100%;background:#0b0e13;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font:inherit}
+textarea{min-height:70px;resize:vertical}
+.row{display:flex;gap:8px;align-items:center}
+.row input[type=checkbox]{width:auto}
+button{background:var(--acc);color:#0b0e13;border:0;border-radius:8px;padding:10px 14px;font:600 15px -apple-system,system-ui,sans-serif;cursor:pointer}
+button.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+button:disabled{opacity:.5}
+.stat{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)}
+.stat:last-child{border:0}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--muted);margin-right:7px}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.err{background:var(--err)}
+.bar{height:6px;background:#0b0e13;border-radius:4px;overflow:hidden;margin-top:8px}
+.bar>div{height:100%;width:0;background:var(--acc);transition:width .3s}
+#log{height:230px;overflow:auto;font:12.5px/1.5 ui-monospace,Menlo,monospace;background:#0b0e13;border-radius:8px;padding:10px;white-space:pre-wrap}
+#reply{white-space:pre-wrap;margin-top:10px;color:var(--text)}
+.hint{font-size:13px;color:var(--muted);margin-top:8px}
+</style>
+</head>
+<body>
+<h1>Nœud IA</h1>
+<p class="sub">Modèle de langage exécuté sur la puce de l'iPad, joignable via Telegram.</p>
+
+<div class="grid">
+  <div class="card">
+    <h2>État</h2>
+    <div class="stat"><span><span class="dot" id="dModel"></span>Modèle</span><span id="sModel">non chargé</span></div>
+    <div class="bar"><div id="prog"></div></div>
+    <div class="hint" id="progText"></div>
+    <div class="stat"><span><span class="dot" id="dNet"></span>Telegram</span><span id="sNet">arrêté</span></div>
+    <div class="stat"><span><span class="dot" id="dWake"></span>Écran maintenu allumé</span><span id="sWake">non</span></div>
+    <div class="stat"><span>Messages traités</span><span id="sDone">0</span></div>
+    <div class="stat"><span>Tâches planifiées</span><span id="sTasks">0</span></div>
+    <div class="stat"><span>En ligne depuis</span><span id="sUp">—</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Configuration</h2>
+    <label>Jeton du bot (BotFather)</label>
+    <input id="token" type="password" placeholder="123456:ABC-…" autocomplete="off">
+    <label>Chat autorisé (le bot te donne l'identifiant au premier message)</label>
+    <input id="owner" inputmode="numeric" placeholder="ex. 123456789">
+    <label>Modèle</label>
+    <select id="model">
+      <option value="Qwen2.5-0.5B-Instruct">Qwen 2.5 — 0,5 Md (très rapide, basique)</option>
+      <option value="Qwen2.5-1.5B-Instruct" selected>Qwen 2.5 — 1,5 Md (bon compromis)</option>
+      <option value="Llama-3.2-3B-Instruct">Llama 3.2 — 3 Md (meilleur, plus lent)</option>
+      <option value="Phi-3.5-mini-instruct">Phi 3.5 mini — 3,8 Md (le plus capable, lourd)</option>
+    </select>
+    <label>Instructions système</label>
+    <textarea id="system"></textarea>
+    <div class="row" style="margin-top:10px"><input type="checkbox" id="auto"><span>Démarrer automatiquement à l'ouverture de la page</span></div>
+    <div class="row" style="margin-top:12px">
+      <button id="start">Démarrer</button>
+      <button class="ghost" id="save">Enregistrer</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Tester le modèle ici</h2>
+    <div class="row"><input id="q" placeholder="Pose une question au modèle local…"><button class="ghost" id="ask">Envoyer</button></div>
+    <div id="reply"></div>
+  </div>
+
+  <div class="card">
+    <h2>Journal</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script type="module">
+import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d){ try{ const v = localStorage.getItem('noeud:'+k); return v === null ? d : JSON.parse(v); }catch{ return d; } },
+  set(k, v){ try{ localStorage.setItem('noeud:'+k, JSON.stringify(v)); }catch{} }
+};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const DEFAULT_SYS = "Tu es un assistant personnel qui tourne en local sur un iPad. Réponds en français, de façon claire et concise. Si une demande dépasse tes capacités, dis-le franchement au lieu d'inventer.";
+
+let engine = null, running = false, startedAt = null, done = 0;
+let offset = store.get('offset', 0);
+let queue = Promise.resolve();
+const enqueue = fn => (queue = queue.then(fn).catch(e => log('Erreur : ' + e.message, 'err')));
+
+function log(msg, cls=''){
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = new Date().toLocaleTimeString('fr-CH') + '  ' + msg;
+  const box = $('log'); box.appendChild(line); box.scrollTop = box.scrollHeight;
+  while (box.childNodes.length > 300) box.removeChild(box.firstChild);
+}
+function setState(dot, span, text, cls){ $(dot).className = 'dot ' + cls; $(span).textContent = text; }
+
+/* ---------- configuration ---------- */
+const cfg = store.get('cfg', {});
+$('token').value = cfg.token || '';
+$('owner').value = cfg.owner || '';
+$('model').value = cfg.model || 'Qwen2.5-1.5B-Instruct';
+$('system').value = store.get('system', DEFAULT_SYS);
+$('auto').checked = !!cfg.auto;
+function saveCfg(){
+  Object.assign(cfg, { token: $('token').value.trim(), owner: $('owner').value.trim(), model: $('model').value, auto: $('auto').checked });
+  store.set('cfg', cfg); store.set('system', $('system').value.trim() || DEFAULT_SYS);
+}
+$('save').onclick = () => { saveCfg(); log('Configuration enregistrée.', 'ok'); };
+
+/* ---------- écran allumé ---------- */
+let wakeLock = null;
+async function keepAwake(){
+  if (!('wakeLock' in navigator)) { setState('dWake','sWake','non pris en charge','warn'); return; }
+  if (wakeLock && !wakeLock.released) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    setState('dWake','sWake','oui','ok');
+    wakeLock.addEventListener('release', () => setState('dWake','sWake','relâché — touche l\'écran','warn'));
+  } catch { setState('dWake','sWake','touche l\'écran pour activer','warn'); }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
+document.addEventListener('click', keepAwake);
+
+/* ---------- modèle ---------- */
+async function loadModel(){
+  if (!navigator.gpu) throw new Error("WebGPU indisponible dans ce navigateur (utilise Safari avec le réglage activé).");
+  const adapter = await navigator.gpu.requestAdapter();
+  const f16 = adapter && adapter.features.has('shader-f16');
+  const id = cfg.model + (f16 ? '-q4f16_1-MLC' : '-q4f32_1-MLC');
+  setState('dModel','sModel','chargement…','warn');
+  log('Chargement de ' + id + ' (le premier téléchargement peut prendre plusieurs minutes).');
+  engine = await webllm.CreateMLCEngine(id, {
+    initProgressCallback: p => { $('prog').style.width = Math.round((p.progress||0)*100) + '%'; $('progText').textContent = p.text || ''; }
+  });
+  $('prog').style.width = '100%'; $('progText').textContent = '';
+  setState('dModel','sModel', cfg.model.split('-Instruct')[0].replace('-instruct',''), 'ok');
+  log('Modèle prêt.', 'ok');
+}
+async function ask(messages, max_tokens = 700){
+  const sys = { role: 'system', content: store.get('system', DEFAULT_SYS) };
+  const r = await engine.chat.completions.create({ messages: [sys, ...messages], temperature: 0.6, max_tokens });
+  return (r.choices[0].message.content || '').trim() || '(réponse vide)';
+}
+
+/* ---------- Telegram ---------- */
+async function tg(method, params = {}){
+  const body = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) body.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+  const r = await fetch(`https://api.telegram.org/bot${cfg.token}/${method}`, { method: 'POST', body });
+  return r.json();
+}
+async function send(chatId, text){
+  for (let i = 0; i < text.length; i += 4000) await tg('sendMessage', { chat_id: chatId, text: text.slice(i, i + 4000) });
+}
+async function withTyping(chatId, fn){
+  const tick = () => tg('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  tick(); const t = setInterval(tick, 4500);
+  try { return await fn(); } finally { clearInterval(t); }
+}
+
+async function pollLoop(){
+  let backoff = 2000;
+  while (running) {
+    try {
+      const res = await tg('getUpdates', { offset, timeout: 25, allowed_updates: ['message'] });
+      if (!res.ok) throw new Error(res.description || 'réponse invalide');
+      setState('dNet','sNet','connecté','ok'); backoff = 2000;
+      for (const u of res.result) {
+        offset = u.update_id + 1; store.set('offset', offset);
+        if (u.message && typeof u.message.text === 'string') enqueue(() => handle(u.message));
+      }
+    } catch (e) {
+      setState('dNet','sNet','hors ligne, nouvel essai','err');
+      log('Telegram : ' + e.message, 'err');
+      await sleep(backoff); backoff = Math.min(backoff * 2, 60000);
+    }
+  }
+}
+
+const HELP = `Commandes :
+/statut — état du nœud
+/reset — effacer la mémoire de conversation
+/tache HH:MM consigne — tâche quotidienne (ex. /tache 07:30 Donne-moi trois idées pour organiser ma journée)
+/taches — lister les tâches
+/suppr N — supprimer la tâche N
+/lancer N — exécuter la tâche N maintenant
+Tout autre message est envoyé au modèle.`;
+
+async function handle(msg){
+  const chatId = msg.chat.id, text = msg.text.trim();
+  if (!cfg.owner) {
+    await send(chatId, `Ton identifiant de chat est ${chatId}. Colle-le dans le champ « Chat autorisé » sur l'iPad, puis touche Enregistrer.`);
+    log('Identifiant communiqué au chat ' + chatId + '.', 'warn'); return;
+  }
+  if (String(chatId) !== String(cfg.owner)) { log('Message ignoré : chat non autorisé (' + chatId + ').', 'warn'); return; }
+  if (text.startsWith('/')) return command(chatId, text);
+
+  const hist = store.get('hist', []);
+  hist.push({ role: 'user', content: text });
+  const ctx = hist.slice(-12);
+  const t0 = performance.now();
+  const answer = await withTyping(chatId, () => ask(ctx));
+  ctx.push({ role: 'assistant', content: answer });
+  store.set('hist', ctx.slice(-12));
+  await send(chatId, answer);
+  done++; $('sDone').textContent = done;
+  log(`Réponse envoyée en ${((performance.now() - t0) / 1000).toFixed(1)} s.`, 'ok');
+}
+
+async function command(chatId, text){
+  const [cmd, ...rest] = text.split(' ');
+  const arg = rest.join(' ').trim();
+  const tasks = store.get('tasks', []);
+  switch (cmd.split('@')[0].toLowerCase()) {
+    case '/start': case '/aide': return send(chatId, HELP);
+    case '/reset': store.set('hist', []); return send(chatId, 'Mémoire de conversation effacée.');
+    case '/statut': return send(chatId, `Modèle : ${cfg.model}\nEn ligne depuis : ${uptime()}\nMessages traités : ${done}\nTâches planifiées : ${tasks.length}`);
+    case '/tache': {
+      const m = arg.match(/^(\d{1,2}):(\d{2})\s+(.+)$/s);
+      if (!m) return send(chatId, 'Format : /tache HH:MM consigne');
+      const time = m[1].padStart(2, '0') + ':' + m[2];
+      const task = { time, prompt: m[3], lastRun: time <= hhmm() ? today() : '' };
+      tasks.push(task); store.set('tasks', tasks); refreshTasks();
+      return send(chatId, `Tâche ajoutée, chaque jour à ${time}.`);
+    }
+    case '/taches':
+      return send(chatId, tasks.length ? tasks.map((t, i) => `${i + 1}. ${t.time} — ${t.prompt}`).join('\n') : 'Aucune tâche planifiée.');
+    case '/suppr': {
+      const i = parseInt(arg, 10) - 1;
+      if (!tasks[i]) return send(chatId, 'Numéro invalide.');
+      tasks.splice(i, 1); store.set('tasks', tasks); refreshTasks();
+      return send(chatId, 'Tâche supprimée.');
+    }
+    case '/lancer': {
+      const t = tasks[parseInt(arg, 10) - 1];
+      if (!t) return send(chatId, 'Numéro invalide.');
+      return runTask(t);
+    }
+    default: return send(chatId, 'Commande inconnue.\n\n' + HELP);
+  }
+}
+
+/* ---------- tâches planifiées ---------- */
+const pad = n => String(n).padStart(2, '0');
+const hhmm = () => { const d = new Date(); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+const today = () => new Date().toLocaleDateString('sv-SE');
+function refreshTasks(){ $('sTasks').textContent = store.get('tasks', []).length; }
+async function runTask(task){
+  log('Tâche planifiée : ' + task.prompt.slice(0, 60));
+  const answer = await withTyping(cfg.owner, () => ask([{ role: 'user', content: task.prompt }], 900));
+  await send(cfg.owner, `Tâche de ${task.time}\n\n${answer}`);
+  done++; $('sDone').textContent = done;
+}
+function scheduler(){
+  if (!running || !engine || !cfg.owner) return;
+  const tasks = store.get('tasks', []), now = hhmm(), d = today();
+  let changed = false;
+  for (const t of tasks) if (t.lastRun !== d && t.time <= now) { t.lastRun = d; changed = true; enqueue(() => runTask(t)); }
+  if (changed) store.set('tasks', tasks);
+}
+setInterval(scheduler, 20000);
+
+/* ---------- démarrage ---------- */
+function uptime(){
+  if (!startedAt) return '—';
+  const s = Math.floor((Date.now() - startedAt) / 1000);
+  return `${Math.floor(s / 3600)} h ${pad(Math.floor(s / 60) % 60)} min`;
+}
+setInterval(() => $('sUp').textContent = uptime(), 30000);
+
+async function start(){
+  saveCfg();
+  if (!cfg.token) { log('Ajoute d\'abord le jeton du bot.', 'err'); return; }
+  $('start').disabled = true; keepAwake();
+  try {
+    if (!engine) await loadModel();
+    running = true; startedAt = startedAt || Date.now(); $('sUp').textContent = uptime();
+    refreshTasks();
+    log('Écoute de Telegram démarrée.', 'ok');
+    pollLoop();
+  } catch (e) {
+    setState('dModel','sModel','erreur','err'); log(e.message, 'err'); $('start').disabled = false;
+  }
+}
+$('start').onclick = start;
+
+$('ask').onclick = async () => {
+  const q = $('q').value.trim(); if (!q) return;
+  try {
+    if (!engine) await loadModel();
+    $('reply').textContent = 'Réflexion…';
+    const t0 = performance.now();
+    $('reply').textContent = await ask([{ role: 'user', content: q }]);
+    log(`Test local : ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+  } catch (e) { $('reply').textContent = ''; log(e.message, 'err'); }
+};
+
+refreshTasks();
+if (cfg.auto && cfg.token) { log('Démarrage automatique…'); start(); }
+</script>
+</body>
+</html>
