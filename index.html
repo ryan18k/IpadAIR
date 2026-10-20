@@ -58,14 +58,19 @@ button:disabled{opacity:.5}
     <input id="token" type="password" placeholder="123456:ABC-…" autocomplete="off">
     <label>Chat autorisé (le bot te donne l'identifiant au premier message)</label>
     <input id="owner" inputmode="numeric" placeholder="ex. 123456789">
+    <label>Moteur de calcul</label>
+    <select id="backend">
+      <option value="cpu" selected>Processeur (WebAssembly) — stable, recommandé sur iPad</option>
+      <option value="gpu">Carte graphique (WebGPU) — plus rapide, expérimental</option>
+    </select>
     <label>Modèle</label>
     <select id="model">
-      <option value="Qwen2.5-0.5B-Instruct">Qwen 2.5 — 0,5 Md (très rapide, basique)</option>
-      <option value="Qwen2.5-1.5B-Instruct" selected>Qwen 2.5 — 1,5 Md (bon compromis)</option>
-      <option value="Llama-3.2-3B-Instruct">Llama 3.2 — 3 Md (meilleur, plus lent)</option>
-      <option value="Phi-3.5-mini-instruct">Phi 3.5 mini — 3,8 Md (le plus capable, lourd)</option>
+      <option value="q05" selected>Qwen 2.5 — 0,5 Md (rapide, basique)</option>
+      <option value="l1">Llama 3.2 — 1 Md (équilibré)</option>
+      <option value="q15">Qwen 2.5 — 1,5 Md (meilleur, plus lent)</option>
+      <option value="l3">Llama 3.2 — 3 Md (GPU uniquement)</option>
     </select>
-    <div class="row" style="margin-top:10px"><input type="checkbox" id="f32"><span>Forcer f32 (si le chargement échoue)</span></div>
+    <div class="row" style="margin-top:10px"><input type="checkbox" id="f32"><span>GPU : forcer f32 (si le chargement échoue)</span></div>
     <label>Instructions système</label>
     <textarea id="system"></textarea>
     <div class="row" style="margin-top:10px"><input type="checkbox" id="auto"><span>Démarrer automatiquement à l'ouverture de la page</span></div>
@@ -88,7 +93,14 @@ button:disabled{opacity:.5}
 </div>
 
 <script type="module">
-import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+import { Wllama } from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js";
+const WLLAMA_WASM = { default: "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/wasm/wllama.wasm" };
+const MODELS = {
+  q05: { name: "Qwen 2.5 0,5 Md", mlc: "Qwen2.5-0.5B-Instruct", hf: "Qwen/Qwen2.5-0.5B-Instruct-GGUF" },
+  l1:  { name: "Llama 3.2 1 Md",  mlc: "Llama-3.2-1B-Instruct", hf: "bartowski/Llama-3.2-1B-Instruct-GGUF" },
+  q15: { name: "Qwen 2.5 1,5 Md", mlc: "Qwen2.5-1.5B-Instruct", hf: "Qwen/Qwen2.5-1.5B-Instruct-GGUF" },
+  l3:  { name: "Llama 3.2 3 Md",  mlc: "Llama-3.2-3B-Instruct", hf: null },
+};
 
 const $ = id => document.getElementById(id);
 const store = {
@@ -116,11 +128,13 @@ function setState(dot, span, text, cls){ $(dot).className = 'dot ' + cls; $(span
 const cfg = store.get('cfg', {});
 $('token').value = cfg.token || '';
 $('owner').value = cfg.owner || '';
-$('model').value = cfg.model || 'Qwen2.5-1.5B-Instruct';
+if (!MODELS[cfg.model]) cfg.model = 'q05';
+$('model').value = cfg.model;
+$('backend').value = cfg.backend || 'cpu';
 $('system').value = store.get('system', DEFAULT_SYS);
 $('auto').checked = !!cfg.auto;
 function saveCfg(){
-  Object.assign(cfg, { token: $('token').value.trim(), owner: $('owner').value.trim(), model: $('model').value, auto: $('auto').checked });
+  Object.assign(cfg, { token: $('token').value.trim(), owner: $('owner').value.trim(), model: $('model').value, backend: $('backend').value, auto: $('auto').checked });
   store.set('cfg', cfg); store.set('system', $('system').value.trim() || DEFAULT_SYS);
 }
 $('save').onclick = () => { saveCfg(); log('Configuration enregistrée.', 'ok'); };
@@ -146,36 +160,62 @@ function loadModel(){
   if (!loading) loading = doLoad().finally(() => { loading = null; });
   return loading;
 }
+let backend = null; // { kind, run(messages, max_tokens) }
+const progress = (frac, text) => { $('prog').style.width = Math.round((frac || 0) * 100) + '%'; $('progText').textContent = text || ''; };
+
 async function doLoad(){
-  if (!navigator.gpu) throw new Error("WebGPU indisponible dans ce navigateur (utilise Safari avec le réglage activé).");
+  const m = MODELS[cfg.model] || MODELS.q05;
+  setState('dModel','sModel','chargement…','warn');
+  try {
+    if ((cfg.backend || 'cpu') === 'gpu') await loadGPU(m); else await loadCPU(m);
+  } catch (err) {
+    engine = null; backend = null;
+    setState('dModel','sModel','erreur','err');
+    log('Échec du chargement : ' + (err && (err.stack || err.message) || err), 'err');
+    throw new Error('Chargement impossible. Essaie le modèle 0,5 Md, ou l\'autre moteur de calcul.');
+  }
+  progress(1, '');
+  setState('dModel','sModel', m.name + (backend.kind === 'gpu' ? ' · GPU' : ' · CPU'), 'ok');
+  log('Modèle prêt.', 'ok');
+}
+
+async function loadCPU(m){
+  if (!m.hf) throw new Error('Ce modèle n\'existe qu\'en version GPU. Choisis-en un autre pour le processeur.');
+  log('Chargement de ' + m.name + ' sur le processeur (le premier téléchargement peut prendre plusieurs minutes).');
+  const w = new Wllama(WLLAMA_WASM, { suppressNativeLog: true, allowOffline: true });
+  await w.loadModelFromHF({ repo: m.hf, quant: 'Q4_K_M' }, {
+    n_ctx: 4096, n_gpu_layers: 0,
+    progressCallback: ({ loaded, total }) => progress(total ? loaded / total : 0, `Téléchargement : ${Math.round(loaded / 1048576)} / ${Math.round((total || 0) / 1048576)} Mo`),
+  });
+  engine = w;
+  backend = { kind: 'cpu', run: async (messages, max_tokens) => {
+    const r = await w.createChatCompletion({ messages, max_tokens, temperature: 0.6, top_k: 40, top_p: 0.9 });
+    return r.choices[0].message.content;
+  }};
+}
+
+async function loadGPU(m){
+  if (!navigator.gpu) throw new Error("WebGPU indisponible dans ce navigateur.");
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("Aucun GPU accessible via WebGPU.");
   const L = adapter.limits, mb = x => Math.round(x / 1048576) + ' Mo';
   log(`GPU : tampon max ${mb(L.maxBufferSize)}, stockage max ${mb(L.maxStorageBufferBindingSize)}, f16 ${adapter.features.has('shader-f16') ? 'oui' : 'non'}.`);
-  if (!cfg.model) cfg.model = $('model').value || 'Qwen2.5-1.5B-Instruct';
+  const webllm = await import("https://esm.run/@mlc-ai/web-llm");
   const f16 = adapter.features.has('shader-f16') && !$('f32').checked;
-  const id = cfg.model + (f16 ? '-q4f16_1-MLC' : '-q4f32_1-MLC');
-  setState('dModel','sModel','chargement…','warn');
-  log('Chargement de ' + id + ' (le premier téléchargement peut prendre plusieurs minutes).');
-  try {
-    const e = await webllm.CreateMLCEngine(id, {
-      initProgressCallback: p => { $('prog').style.width = Math.round((p.progress||0)*100) + '%'; $('progText').textContent = p.text || ''; }
-    });
-    engine = e;
-  } catch (err) {
-    engine = null;
-    setState('dModel','sModel','erreur','err');
-    log('Échec du chargement : ' + (err && (err.stack || err.message) || err), 'err');
-    throw new Error("Le GPU a refusé le modèle. Essaie le modèle 0,5 Md, puis l'option « Forcer f32 ».");
-  }
-  $('prog').style.width = '100%'; $('progText').textContent = '';
-  setState('dModel','sModel', cfg.model.replace(/-[Ii]nstruct$/, ''), 'ok');
-  log('Modèle prêt.', 'ok');
+  const id = m.mlc + (f16 ? '-q4f16_1-MLC' : '-q4f32_1-MLC');
+  log('Chargement de ' + id + ' sur le GPU.');
+  const e = await webllm.CreateMLCEngine(id, { initProgressCallback: p => progress(p.progress, p.text) });
+  engine = e;
+  backend = { kind: 'gpu', run: async (messages, max_tokens) => {
+    const r = await e.chat.completions.create({ messages, temperature: 0.6, max_tokens });
+    return r.choices[0].message.content;
+  }};
 }
+
 async function ask(messages, max_tokens = 700){
   const sys = { role: 'system', content: store.get('system', DEFAULT_SYS) };
-  const r = await engine.chat.completions.create({ messages: [sys, ...messages], temperature: 0.6, max_tokens });
-  return (r.choices[0].message.content || '').trim() || '(réponse vide)';
+  const out = await backend.run([sys, ...messages], max_tokens);
+  return (out || '').trim() || '(réponse vide)';
 }
 
 /* ---------- Telegram ---------- */
@@ -250,7 +290,7 @@ async function command(chatId, text){
   switch (cmd.split('@')[0].toLowerCase()) {
     case '/start': case '/aide': return send(chatId, HELP);
     case '/reset': store.set('hist', []); return send(chatId, 'Mémoire de conversation effacée.');
-    case '/statut': return send(chatId, `Modèle : ${cfg.model}\nEn ligne depuis : ${uptime()}\nMessages traités : ${done}\nTâches planifiées : ${tasks.length}`);
+    case '/statut': return send(chatId, `Modèle : ${(MODELS[cfg.model]||{}).name} (${backend ? backend.kind.toUpperCase() : 'non chargé'})\nEn ligne depuis : ${uptime()}\nMessages traités : ${done}\nTâches planifiées : ${tasks.length}`);
     case '/tache': {
       const m = arg.match(/^(\d{1,2}):(\d{2})\s+(.+)$/s);
       if (!m) return send(chatId, 'Format : /tache HH:MM consigne');
