@@ -1,0 +1,20 @@
+[
+  {
+    "name": "prix_crypto",
+    "file": "prix_crypto.py",
+    "description": "Cours actuels de cryptomonnaies en CHF et USD, avec la variation sur 24 h (CoinGecko).",
+    "args": "identifiants CoinGecko, ex. bitcoin ethereum solana (par défaut : bitcoin ethereum solana)"
+  },
+  {
+    "name": "meteo",
+    "file": "meteo.py",
+    "description": "Météo actuelle et prévisions sur 3 jours pour une ville (Open-Meteo).",
+    "args": "nom de la ville, ex. Lausanne (par défaut : Lausanne)"
+  },
+  {
+    "name": "benchmark",
+    "file": "benchmark.py",
+    "description": "Teste la puissance de calcul de l'iPad (nombres premiers, calcul matriciel) et affiche la version de Python.",
+    "timeout": 180
+  }
+]

@@ -15,6 +15,7 @@ h1{font-size:22px;margin:4px 0 2px}
 @media (max-width:760px){.grid{grid-template-columns:1fr}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
 .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 10px}
+.card h3{font-size:13px;color:var(--acc);margin:16px 0 0}
 label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
 input,select,textarea{width:100%;background:#0b0e13;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font:inherit}
 textarea{min-height:70px;resize:vertical}
@@ -23,28 +24,33 @@ textarea{min-height:70px;resize:vertical}
 button{background:var(--acc);color:#0b0e13;border:0;border-radius:8px;padding:10px 14px;font:600 15px -apple-system,system-ui,sans-serif;cursor:pointer}
 button.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
 button:disabled{opacity:.5}
-.stat{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)}
+.stat{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid var(--line)}
 .stat:last-child{border:0}
+.stat span:last-child{text-align:right}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--muted);margin-right:7px}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.err{background:var(--err)}
 .bar{height:6px;background:#0b0e13;border-radius:4px;overflow:hidden;margin-top:8px}
 .bar>div{height:100%;width:0;background:var(--acc);transition:width .3s}
-#log{height:230px;overflow:auto;font:12.5px/1.5 ui-monospace,Menlo,monospace;background:#0b0e13;border-radius:8px;padding:10px;white-space:pre-wrap}
-#reply{white-space:pre-wrap;margin-top:10px;color:var(--text)}
+#log{height:260px;overflow:auto;font:12.5px/1.5 ui-monospace,Menlo,monospace;background:#0b0e13;border-radius:8px;padding:10px;white-space:pre-wrap}
+#reply{white-space:pre-wrap;margin-top:10px;color:var(--text);max-height:340px;overflow:auto}
 .hint{font-size:13px;color:var(--muted);margin-top:8px}
+.local-only{display:none}
+body.brain-local .local-only{display:block}
+body.brain-local .or-only{display:none}
 </style>
 </head>
 <body>
 <h1>Nœud IA</h1>
-<p class="sub">Modèle de langage exécuté sur la puce de l'iPad, joignable via Telegram.</p>
+<p class="sub">Agent permanent sur l'iPad : il raisonne, exécute du Python et lance tes scripts, joignable via Telegram.</p>
 
 <div class="grid">
   <div class="card">
     <h2>État</h2>
-    <div class="stat"><span><span class="dot" id="dModel"></span>Modèle</span><span id="sModel">non chargé</span></div>
+    <div class="stat"><span><span class="dot" id="dModel"></span>Cerveau</span><span id="sModel">non démarré</span></div>
     <div class="bar"><div id="prog"></div></div>
     <div class="hint" id="progText"></div>
+    <div class="stat"><span><span class="dot" id="dPy"></span>Python</span><span id="sPy">chargé à la première exécution</span></div>
     <div class="stat"><span><span class="dot" id="dNet"></span>Telegram</span><span id="sNet">arrêté</span></div>
     <div class="stat"><span><span class="dot" id="dWake"></span>Écran maintenu allumé</span><span id="sWake">non</span></div>
     <div class="stat"><span>Messages traités</span><span id="sDone">0</span></div>
@@ -58,21 +64,46 @@ button:disabled{opacity:.5}
     <input id="token" type="password" placeholder="123456:ABC-…" autocomplete="off">
     <label>Chat autorisé (le bot te donne l'identifiant au premier message)</label>
     <input id="owner" inputmode="numeric" placeholder="ex. 123456789">
-    <label>Moteur de calcul</label>
-    <select id="backend">
-      <option value="cpu" selected>Processeur (WebAssembly) — stable, recommandé sur iPad</option>
-      <option value="gpu">Carte graphique (WebGPU) — plus rapide, expérimental</option>
+
+    <label>Cerveau</label>
+    <select id="brain">
+      <option value="openrouter" selected>OpenRouter — modèles puissants, avec outils (recommandé)</option>
+      <option value="local">Modèle local sur l'iPad — hors ligne, sans outils</option>
     </select>
-    <label>Modèle</label>
-    <select id="model">
-      <option value="q05" selected>Qwen 2.5 — 0,5 Md (rapide, basique)</option>
-      <option value="l1">Llama 3.2 — 1 Md (équilibré)</option>
-      <option value="q15">Qwen 2.5 — 1,5 Md (meilleur, plus lent)</option>
-      <option value="l3">Llama 3.2 — 3 Md (GPU uniquement)</option>
-    </select>
-    <div class="row" style="margin-top:10px"><input type="checkbox" id="f32"><span>GPU : forcer f32 (si le chargement échoue)</span></div>
-    <label>Instructions système</label>
-    <textarea id="system"></textarea>
+
+    <div class="or-only">
+      <label>Clé API OpenRouter</label>
+      <input id="orKey" type="password" placeholder="sk-or-v1-…" autocomplete="off">
+      <label>Modèle OpenRouter (les « :free » sont gratuits)</label>
+      <input id="orModel" list="orModels" autocomplete="off" spellcheck="false">
+      <datalist id="orModels">
+        <option value="nvidia/nemotron-3-super-120b-a12b:free">
+        <option value="minimax/minimax-m3.1-flash:free">
+        <option value="google/gemma-4-31b-it:free">
+        <option value="nvidia/nemotron-3-ultra-550b-a55b:free">
+        <option value="thinkingmachines/inkling:free">
+        <option value="cohere/north-mini-code:free">
+      </datalist>
+    </div>
+
+    <div class="local-only">
+      <label>Moteur de calcul local</label>
+      <select id="backend">
+        <option value="cpu" selected>Processeur (WebAssembly) — stable</option>
+        <option value="gpu">Carte graphique (WebGPU) — expérimental</option>
+      </select>
+      <label>Modèle local</label>
+      <select id="model">
+        <option value="q05">Qwen 2.5 — 0,5 Md (rapide, basique)</option>
+        <option value="l1">Llama 3.2 — 1 Md (équilibré)</option>
+        <option value="q15" selected>Qwen 2.5 — 1,5 Md (meilleur, plus lent)</option>
+        <option value="l3">Llama 3.2 — 3 Md (GPU uniquement)</option>
+      </select>
+      <div class="row" style="margin-top:10px"><input type="checkbox" id="f32"><span>GPU : forcer f32</span></div>
+    </div>
+
+    <label>Instructions supplémentaires (facultatif)</label>
+    <textarea id="system" placeholder="Ex. : réponds toujours en français, de façon concise."></textarea>
     <div class="row" style="margin-top:10px"><input type="checkbox" id="auto"><span>Démarrer automatiquement à l'ouverture de la page</span></div>
     <div class="row" style="margin-top:12px">
       <button id="start">Démarrer</button>
@@ -81,8 +112,8 @@ button:disabled{opacity:.5}
   </div>
 
   <div class="card">
-    <h2>Tester le modèle ici</h2>
-    <div class="row"><input id="q" placeholder="Pose une question au modèle local…"><button class="ghost" id="ask">Envoyer</button></div>
+    <h2>Tester ici</h2>
+    <div class="row"><input id="q" placeholder="Ex. : calcule les 20 premiers nombres premiers en Python"><button class="ghost" id="ask">Envoyer</button></div>
     <div id="reply"></div>
   </div>
 
@@ -93,24 +124,15 @@ button:disabled{opacity:.5}
 </div>
 
 <script type="module">
-import { Wllama } from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js";
-const WLLAMA_WASM = { default: "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/wasm/wllama.wasm" };
-const MODELS = {
-  q05: { name: "Qwen 2.5 0,5 Md", mlc: "Qwen2.5-0.5B-Instruct", hf: "Qwen/Qwen2.5-0.5B-Instruct-GGUF" },
-  l1:  { name: "Llama 3.2 1 Md",  mlc: "Llama-3.2-1B-Instruct", hf: "bartowski/Llama-3.2-1B-Instruct-GGUF" },
-  q15: { name: "Qwen 2.5 1,5 Md", mlc: "Qwen2.5-1.5B-Instruct", hf: "Qwen/Qwen2.5-1.5B-Instruct-GGUF" },
-  l3:  { name: "Llama 3.2 3 Md",  mlc: "Llama-3.2-3B-Instruct", hf: null },
-};
-
 const $ = id => document.getElementById(id);
 const store = {
   get(k, d){ try{ const v = localStorage.getItem('noeud:'+k); return v === null ? d : JSON.parse(v); }catch{ return d; } },
   set(k, v){ try{ localStorage.setItem('noeud:'+k, JSON.stringify(v)); }catch{} }
 };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const DEFAULT_SYS = "Tu es un assistant personnel qui tourne en local sur un iPad. Réponds en français, de façon claire et concise. Si une demande dépasse tes capacités, dis-le franchement au lieu d'inventer.";
+const clip = (s, n) => (s = String(s ?? '')).length > n ? s.slice(0, n) + `\n… (${s.length - n} caractères coupés)` : s;
 
-let engine = null, running = false, startedAt = null, done = 0;
+let running = false, startedAt = null, done = 0;
 let offset = store.get('offset', 0);
 let queue = Promise.resolve();
 const enqueue = fn => (queue = queue.then(fn).catch(e => log('Erreur : ' + e.message, 'err')));
@@ -120,26 +142,45 @@ function log(msg, cls=''){
   if (cls) line.className = cls;
   line.textContent = new Date().toLocaleTimeString('fr-CH') + '  ' + msg;
   const box = $('log'); box.appendChild(line); box.scrollTop = box.scrollHeight;
-  while (box.childNodes.length > 300) box.removeChild(box.firstChild);
+  while (box.childNodes.length > 400) box.removeChild(box.firstChild);
 }
 function setState(dot, span, text, cls){ $(dot).className = 'dot ' + cls; $(span).textContent = text; }
+const progress = (frac, text) => { $('prog').style.width = Math.round((frac || 0) * 100) + '%'; $('progText').textContent = text || ''; };
 
-/* ---------- configuration ---------- */
+/* ================= configuration ================= */
+const MODELS = {
+  q05: { name: "Qwen 2.5 0,5 Md", mlc: "Qwen2.5-0.5B-Instruct", hf: "Qwen/Qwen2.5-0.5B-Instruct-GGUF" },
+  l1:  { name: "Llama 3.2 1 Md",  mlc: "Llama-3.2-1B-Instruct", hf: "bartowski/Llama-3.2-1B-Instruct-GGUF" },
+  q15: { name: "Qwen 2.5 1,5 Md", mlc: "Qwen2.5-1.5B-Instruct", hf: "Qwen/Qwen2.5-1.5B-Instruct-GGUF" },
+  l3:  { name: "Llama 3.2 3 Md",  mlc: "Llama-3.2-3B-Instruct", hf: null },
+};
+const DEFAULT_OR_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
 const cfg = store.get('cfg', {});
+if (!MODELS[cfg.model]) cfg.model = 'q15';
 $('token').value = cfg.token || '';
 $('owner').value = cfg.owner || '';
-if (!MODELS[cfg.model]) cfg.model = 'q05';
-$('model').value = cfg.model;
+$('brain').value = cfg.brain || 'openrouter';
+$('orKey').value = cfg.orKey || '';
+$('orModel').value = cfg.orModel || DEFAULT_OR_MODEL;
 $('backend').value = cfg.backend || 'cpu';
-$('system').value = store.get('system', DEFAULT_SYS);
+$('model').value = cfg.model;
 $('auto').checked = !!cfg.auto;
-function saveCfg(){
-  Object.assign(cfg, { token: $('token').value.trim(), owner: $('owner').value.trim(), model: $('model').value, backend: $('backend').value, auto: $('auto').checked });
-  store.set('cfg', cfg); store.set('system', $('system').value.trim() || DEFAULT_SYS);
-}
-$('save').onclick = () => { saveCfg(); log('Configuration enregistrée.', 'ok'); };
+{ const s = store.get('system', ''); $('system').value = s.startsWith('Tu es un assistant personnel qui tourne en local') ? '' : s; }
 
-/* ---------- écran allumé ---------- */
+function applyBrainClass(){ document.body.classList.toggle('brain-local', $('brain').value === 'local'); }
+$('brain').onchange = applyBrainClass; applyBrainClass();
+
+function saveCfg(){
+  Object.assign(cfg, {
+    token: $('token').value.trim(), owner: $('owner').value.trim(),
+    brain: $('brain').value, orKey: $('orKey').value.trim(), orModel: $('orModel').value.trim() || DEFAULT_OR_MODEL,
+    backend: $('backend').value, model: $('model').value, auto: $('auto').checked,
+  });
+  store.set('cfg', cfg); store.set('system', $('system').value.trim());
+}
+$('save').onclick = () => { saveCfg(); log('Configuration enregistrée. Recharge la page si tu as changé de cerveau ou de modèle local.', 'ok'); };
+
+/* ================= écran allumé ================= */
 let wakeLock = null;
 async function keepAwake(){
   if (!('wakeLock' in navigator)) { setState('dWake','sWake','non pris en charge','warn'); return; }
@@ -153,72 +194,219 @@ async function keepAwake(){
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
 document.addEventListener('click', keepAwake);
 
-/* ---------- modèle ---------- */
-let loading = null;
-function loadModel(){
-  if (engine) return Promise.resolve();
-  if (!loading) loading = doLoad().finally(() => { loading = null; });
+/* ================= Python (Pyodide dans un worker) ================= */
+const PYODIDE = 'https://cdn.jsdelivr.net/pyodide/v0.29.0/full/';
+const WORKER_SRC = `
+let py = null;
+const loaded = new Set();
+async function boot(){
+  importScripts('${PYODIDE}pyodide.js');
+  py = await loadPyodide({ indexURL: '${PYODIDE}' });
+}
+self.onmessage = async (e) => {
+  const { id, code } = e.data;
+  let out = '';
+  const t0 = performance.now();
+  try {
+    if (!py) { await boot(); self.postMessage({ id: 0, booted: true, ms: performance.now() - t0 }); }
+    py.setStdout({ batched: s => { out += s + '\\n'; } });
+    py.setStderr({ batched: s => { out += s + '\\n'; } });
+    let imps = [];
+    try { const pr = py.pyodide_py.code.find_imports(code); imps = pr.toJs(); pr.destroy(); } catch (_) {}
+    const ALIAS = { sklearn: 'scikit-learn', PIL: 'pillow', bs4: 'beautifulsoup4', yaml: 'pyyaml', cv2: 'opencv-python' };
+    for (const name of imps) {
+      if (loaded.has(name)) continue;
+      loaded.add(name);
+      try { await py.loadPackage(ALIAS[name] || name, { messageCallback: () => {}, errorCallback: () => {} }); } catch (_) {}
+    }
+    const g = py.globals.get('dict')();
+    let r;
+    try { r = await py.runPythonAsync(code, { globals: g }); }
+    finally { g.destroy(); }
+    if (r !== undefined && r !== null) { out += String(r); if (r && r.destroy) r.destroy(); }
+    self.postMessage({ id, ok: true, out });
+  } catch (err) {
+    self.postMessage({ id, ok: false, out: out + String((err && err.message) || err) });
+  }
+};`;
+let pyWorker = null, pySeq = 0;
+const pyReqs = new Map();
+function startPy(){
+  pyWorker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })));
+  pyWorker.onmessage = e => {
+    if (e.data.booted) { setState('dPy','sPy','prêt','ok'); log(`Python prêt (${(e.data.ms / 1000).toFixed(1)} s).`, 'ok'); return; }
+    const r = pyReqs.get(e.data.id); if (r) { pyReqs.delete(e.data.id); r(e.data); }
+  };
+  pyWorker.onerror = e => log('Worker Python : ' + (e.message || 'erreur'), 'err');
+  setState('dPy','sPy','démarrage…','warn');
+}
+function runPython(code, timeoutMs = 120000){
+  if (!pyWorker) startPy();
+  const id = ++pySeq;
+  return new Promise(resolve => {
+    const t = setTimeout(() => {
+      pyReqs.delete(id); pyWorker.terminate(); pyWorker = null;
+      setState('dPy','sPy','redémarré après délai','warn');
+      resolve({ ok: false, out: `Délai dépassé (${timeoutMs / 1000} s) : exécution interrompue.` });
+    }, timeoutMs);
+    pyReqs.set(id, r => { clearTimeout(t); resolve(r); });
+    pyWorker.postMessage({ id, code });
+  });
+}
+
+/* ================= scripts prédéfinis ================= */
+let scriptIndex = null;
+async function getScripts(force = false){
+  if (scriptIndex && !force) return scriptIndex;
+  const r = await fetch('scripts/index.json?v=' + Date.now());
+  if (!r.ok) throw new Error('scripts/index.json introuvable');
+  scriptIndex = await r.json();
+  return scriptIndex;
+}
+async function runScript(name, args = []){
+  const list = await getScripts(true);
+  const s = list.find(x => x.name === name);
+  if (!s) return { ok: false, out: `Script « ${name} » inconnu. Disponibles : ${list.map(x => x.name).join(', ')}` };
+  const r = await fetch('scripts/' + s.file + '?v=' + Date.now());
+  if (!r.ok) return { ok: false, out: 'Fichier du script introuvable : ' + s.file };
+  const src = await r.text();
+  const prelude = `import json as __j\nARGS = __j.loads(${JSON.stringify(JSON.stringify(args.map(String)))})\n`;
+  log(`Script ${name} ${args.join(' ')}`);
+  return runPython(prelude + src, (s.timeout || 120) * 1000);
+}
+
+/* ================= outils de l'agent ================= */
+const TOOLS = [
+  { type: 'function', function: {
+    name: 'run_python',
+    description: "Exécute du code Python 3 (Pyodide, dans le navigateur de l'iPad) et renvoie la sortie. Utilise print() pour afficher les résultats. Le await est autorisé au niveau supérieur. Pour le réseau, utilise `from pyodide.http import pyfetch` (r = await pyfetch(url); data = await r.json()) ; seules les API qui autorisent les navigateurs (CORS) répondent. Paquets disponibles à l'import : numpy, pandas, matplotlib, scipy, etc. Pas d'accès aux fichiers de l'utilisateur ni au shell.",
+    parameters: { type: 'object', properties: { code: { type: 'string', description: 'Code Python à exécuter' } }, required: ['code'] } } },
+  { type: 'function', function: {
+    name: 'run_script',
+    description: "Lance un script Python prédéfini par l'utilisateur, par son nom, avec des arguments facultatifs. Préfère cet outil quand un script existant correspond à la demande.",
+    parameters: { type: 'object', properties: { name: { type: 'string' }, args: { type: 'array', items: { type: 'string' } } }, required: ['name'] } } },
+  { type: 'function', function: {
+    name: 'fetch_url',
+    description: "Récupère le contenu texte d'une URL (API JSON, page simple). Échoue si le site bloque les navigateurs (CORS).",
+    parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
+];
+async function runTool(name, args){
+  try {
+    if (name === 'run_python') { const r = await runPython(args.code || ''); return (r.ok ? '' : 'ERREUR\n') + (r.out.trim() || '(aucune sortie)'); }
+    if (name === 'run_script') { const r = await runScript(args.name, args.args || []); return (r.ok ? '' : 'ERREUR\n') + (r.out.trim() || '(aucune sortie)'); }
+    if (name === 'fetch_url') {
+      const r = await fetch(args.url);
+      return `HTTP ${r.status}\n` + await r.text();
+    }
+    return 'Outil inconnu : ' + name;
+  } catch (e) { return 'ERREUR : ' + e.message + (name === 'fetch_url' ? ' (site probablement bloqué pour les navigateurs)' : ''); }
+}
+
+/* ================= cerveau OpenRouter ================= */
+async function orChat(messages, withTools){
+  const body = { model: cfg.orModel || DEFAULT_OR_MODEL, messages, max_tokens: 3000 };
+  if (withTools) { body.tools = TOOLS; body.tool_choice = 'auto'; }
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + cfg.orKey, 'Content-Type': 'application/json', 'X-Title': 'Noeud IA iPad' },
+    body: JSON.stringify(body),
+  });
+  let j; try { j = await r.json(); } catch { throw new Error('OpenRouter : réponse illisible (HTTP ' + r.status + ')'); }
+  if (!r.ok || j.error) throw new Error('OpenRouter : ' + ((j.error && (j.error.message || JSON.stringify(j.error))) || 'HTTP ' + r.status));
+  if (!j.choices || !j.choices[0]) throw new Error('OpenRouter : réponse vide');
+  return j.choices[0].message;
+}
+
+async function systemPrompt(){
+  let scripts = '';
+  try { scripts = (await getScripts()).map(s => `- ${s.name} : ${s.description}${s.args ? ' (arguments : ' + s.args + ')' : ''}`).join('\n'); } catch {}
+  const extra = store.get('system', '');
+  return `Tu es un agent personnel qui tourne en permanence sur un iPad connecté en 5G. L'utilisateur te parle depuis Telegram.
+Date et heure actuelles : ${new Date().toLocaleString('fr-CH', { timeZone: 'Europe/Zurich' })} (Europe/Zurich).
+Tu disposes d'outils : run_python (exécuter du Python), run_script (scripts prédéfinis), fetch_url (lire une URL).
+Utilise-les dès qu'un calcul, une donnée à jour ou une vérification est nécessaire, plutôt que de deviner. N'invente jamais un résultat que tu n'as pas obtenu.
+Réponds en français, de façon claire et concise, en texte simple adapté à Telegram (pas de tableaux Markdown).
+Scripts prédéfinis disponibles :
+${scripts || '(aucun)'}${extra ? '\n\nConsignes de l\'utilisateur :\n' + extra : ''}`;
+}
+
+async function agent(history){
+  const msgs = [{ role: 'system', content: await systemPrompt() }, ...history];
+  const used = [];
+  let tools = true;
+  for (let step = 0; step < 10; step++) {
+    let m;
+    try { m = await orChat(msgs, tools); }
+    catch (e) {
+      if (tools && /tool|function/i.test(e.message)) { log('Ce modèle ne gère pas les outils : réponse sans outils.', 'warn'); tools = false; step--; continue; }
+      throw e;
+    }
+    if (tools && m.tool_calls && m.tool_calls.length) {
+      msgs.push({ role: 'assistant', content: m.content || '', tool_calls: m.tool_calls });
+      for (const tc of m.tool_calls) {
+        let args = {}; try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
+        log('Outil : ' + tc.function.name + (args.name ? ' ' + args.name : ''));
+        const res = await runTool(tc.function.name, args);
+        used.push(tc.function.name === 'run_script' ? 'script ' + args.name : tc.function.name);
+        msgs.push({ role: 'tool', tool_call_id: tc.id, content: clip(res, 8000) });
+      }
+      continue;
+    }
+    return { text: (m.content || '').trim() || '(réponse vide)', used };
+  }
+  return { text: 'Arrêt : trop d\'étapes sans réponse finale.', used };
+}
+
+/* ================= cerveau local (facultatif) ================= */
+let localRun = null, loading = null;
+function loadLocal(){
+  if (localRun) return Promise.resolve();
+  if (!loading) loading = doLoadLocal().finally(() => { loading = null; });
   return loading;
 }
-let backend = null; // { kind, run(messages, max_tokens) }
-const progress = (frac, text) => { $('prog').style.width = Math.round((frac || 0) * 100) + '%'; $('progText').textContent = text || ''; };
-
-async function doLoad(){
-  const m = MODELS[cfg.model] || MODELS.q05;
+async function doLoadLocal(){
+  const m = MODELS[cfg.model] || MODELS.q15;
   setState('dModel','sModel','chargement…','warn');
   try {
-    if ((cfg.backend || 'cpu') === 'gpu') await loadGPU(m); else await loadCPU(m);
+    if ((cfg.backend || 'cpu') === 'gpu') {
+      if (!navigator.gpu) throw new Error('WebGPU indisponible.');
+      const adapter = await navigator.gpu.requestAdapter();
+      const webllm = await import('https://esm.run/@mlc-ai/web-llm');
+      const f16 = adapter && adapter.features.has('shader-f16') && !$('f32').checked;
+      const e = await webllm.CreateMLCEngine(m.mlc + (f16 ? '-q4f16_1-MLC' : '-q4f32_1-MLC'), { initProgressCallback: p => progress(p.progress, p.text) });
+      localRun = async (messages, max_tokens) => (await e.chat.completions.create({ messages, temperature: 0.6, max_tokens })).choices[0].message.content;
+    } else {
+      if (!m.hf) throw new Error('Ce modèle n\'existe qu\'en version GPU.');
+      const { Wllama } = await import('https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js');
+      const w = new Wllama({ default: 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/wasm/wllama.wasm' }, { suppressNativeLog: true, allowOffline: true });
+      await w.loadModelFromHF({ repo: m.hf, quant: 'Q4_K_M' }, {
+        n_ctx: 4096, n_gpu_layers: 0,
+        progressCallback: ({ loaded, total }) => progress(total ? loaded / total : 0, `Téléchargement : ${Math.round(loaded / 1048576)} / ${Math.round((total || 0) / 1048576)} Mo`),
+      });
+      localRun = async (messages, max_tokens) => (await w.createChatCompletion({ messages, max_tokens, temperature: 0.6, top_k: 40, top_p: 0.9 })).choices[0].message.content;
+    }
   } catch (err) {
-    engine = null; backend = null;
-    setState('dModel','sModel','erreur','err');
-    log('Échec du chargement : ' + (err && (err.stack || err.message) || err), 'err');
-    throw new Error('Chargement impossible. Essaie le modèle 0,5 Md, ou l\'autre moteur de calcul.');
+    localRun = null; setState('dModel','sModel','erreur','err');
+    log('Échec du chargement : ' + ((err && (err.stack || err.message)) || err), 'err');
+    throw new Error('Chargement du modèle local impossible.');
   }
-  progress(1, '');
-  setState('dModel','sModel', m.name + (backend.kind === 'gpu' ? ' · GPU' : ' · CPU'), 'ok');
-  log('Modèle prêt.', 'ok');
+  progress(1, ''); setState('dModel','sModel', m.name + ' (local)', 'ok'); log('Modèle local prêt.', 'ok');
 }
 
-async function loadCPU(m){
-  if (!m.hf) throw new Error('Ce modèle n\'existe qu\'en version GPU. Choisis-en un autre pour le processeur.');
-  log('Chargement de ' + m.name + ' sur le processeur (le premier téléchargement peut prendre plusieurs minutes).');
-  const w = new Wllama(WLLAMA_WASM, { suppressNativeLog: true, allowOffline: true });
-  await w.loadModelFromHF({ repo: m.hf, quant: 'Q4_K_M' }, {
-    n_ctx: 4096, n_gpu_layers: 0,
-    progressCallback: ({ loaded, total }) => progress(total ? loaded / total : 0, `Téléchargement : ${Math.round(loaded / 1048576)} / ${Math.round((total || 0) / 1048576)} Mo`),
-  });
-  engine = w;
-  backend = { kind: 'cpu', run: async (messages, max_tokens) => {
-    const r = await w.createChatCompletion({ messages, max_tokens, temperature: 0.6, top_k: 40, top_p: 0.9 });
-    return r.choices[0].message.content;
-  }};
+/* ================= interface commune ================= */
+async function think(history){
+  if (cfg.brain === 'local') {
+    await loadLocal();
+    const extra = store.get('system', '');
+    const sys = { role: 'system', content: 'Tu es un assistant personnel qui tourne en local sur un iPad. Réponds en français, clairement et brièvement.' + (extra ? '\n' + extra : '') };
+    return { text: ((await localRun([sys, ...history], 700)) || '').trim() || '(réponse vide)', used: [] };
+  }
+  if (!cfg.orKey) throw new Error('Ajoute ta clé API OpenRouter dans la configuration.');
+  return agent(history);
 }
+const footer = used => used.length ? `\n\n— outils : ${[...new Set(used)].join(', ')}` : '';
 
-async function loadGPU(m){
-  if (!navigator.gpu) throw new Error("WebGPU indisponible dans ce navigateur.");
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) throw new Error("Aucun GPU accessible via WebGPU.");
-  const L = adapter.limits, mb = x => Math.round(x / 1048576) + ' Mo';
-  log(`GPU : tampon max ${mb(L.maxBufferSize)}, stockage max ${mb(L.maxStorageBufferBindingSize)}, f16 ${adapter.features.has('shader-f16') ? 'oui' : 'non'}.`);
-  const webllm = await import("https://esm.run/@mlc-ai/web-llm");
-  const f16 = adapter.features.has('shader-f16') && !$('f32').checked;
-  const id = m.mlc + (f16 ? '-q4f16_1-MLC' : '-q4f32_1-MLC');
-  log('Chargement de ' + id + ' sur le GPU.');
-  const e = await webllm.CreateMLCEngine(id, { initProgressCallback: p => progress(p.progress, p.text) });
-  engine = e;
-  backend = { kind: 'gpu', run: async (messages, max_tokens) => {
-    const r = await e.chat.completions.create({ messages, temperature: 0.6, max_tokens });
-    return r.choices[0].message.content;
-  }};
-}
-
-async function ask(messages, max_tokens = 700){
-  const sys = { role: 'system', content: store.get('system', DEFAULT_SYS) };
-  const out = await backend.run([sys, ...messages], max_tokens);
-  return (out || '').trim() || '(réponse vide)';
-}
-
-/* ---------- Telegram ---------- */
+/* ================= Telegram ================= */
 async function tg(method, params = {}){
   const body = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) body.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
@@ -226,6 +414,7 @@ async function tg(method, params = {}){
   return r.json();
 }
 async function send(chatId, text){
+  text = String(text || '(vide)');
   for (let i = 0; i < text.length; i += 4000) await tg('sendMessage', { chat_id: chatId, text: text.slice(i, i + 4000) });
 }
 async function withTyping(chatId, fn){
@@ -253,14 +442,20 @@ async function pollLoop(){
   }
 }
 
-const HELP = `Commandes :
+const HELP = `Écris normalement : l'agent raisonne et utilise Python ou tes scripts si nécessaire.
+
+Commandes directes (sans IA) :
+/scripts — lister les scripts prédéfinis
+/run nom [arguments] — lancer un script (ex. /run prix_crypto bitcoin solana)
+/py code — exécuter du Python (ex. /py print(2**100))
+
+Gestion :
 /statut — état du nœud
 /reset — effacer la mémoire de conversation
-/tache HH:MM consigne — tâche quotidienne (ex. /tache 07:30 Donne-moi trois idées pour organiser ma journée)
+/tache HH:MM consigne — tâche quotidienne (ex. /tache 08:00 Lance prix_crypto et résume la tendance)
 /taches — lister les tâches
 /suppr N — supprimer la tâche N
-/lancer N — exécuter la tâche N maintenant
-Tout autre message est envoyé au modèle.`;
+/lancer N — exécuter la tâche N maintenant`;
 
 async function handle(msg){
   const chatId = msg.chat.id, text = msg.text.trim();
@@ -275,28 +470,55 @@ async function handle(msg){
   hist.push({ role: 'user', content: text });
   const ctx = hist.slice(-12);
   const t0 = performance.now();
-  const answer = await withTyping(chatId, () => ask(ctx));
-  ctx.push({ role: 'assistant', content: answer });
-  store.set('hist', ctx.slice(-12));
-  await send(chatId, answer);
+  try {
+    const { text: answer, used } = await withTyping(chatId, () => think(ctx));
+    ctx.push({ role: 'assistant', content: answer });
+    store.set('hist', ctx.slice(-12));
+    await send(chatId, answer + footer(used));
+    log(`Réponse envoyée en ${((performance.now() - t0) / 1000).toFixed(1)} s.`, 'ok');
+  } catch (e) {
+    log(e.message, 'err');
+    await send(chatId, 'Erreur : ' + e.message);
+  }
   done++; $('sDone').textContent = done;
-  log(`Réponse envoyée en ${((performance.now() - t0) / 1000).toFixed(1)} s.`, 'ok');
 }
 
 async function command(chatId, text){
-  const [cmd, ...rest] = text.split(' ');
-  const arg = rest.join(' ').trim();
+  const sp = text.indexOf(' ');
+  const cmd = (sp < 0 ? text : text.slice(0, sp)).split('@')[0].toLowerCase();
+  const arg = sp < 0 ? '' : text.slice(sp + 1).trim();
   const tasks = store.get('tasks', []);
-  switch (cmd.split('@')[0].toLowerCase()) {
-    case '/start': case '/aide': return send(chatId, HELP);
+  switch (cmd) {
+    case '/start': case '/aide': case '/help': return send(chatId, HELP);
     case '/reset': store.set('hist', []); return send(chatId, 'Mémoire de conversation effacée.');
-    case '/statut': return send(chatId, `Modèle : ${(MODELS[cfg.model]||{}).name} (${backend ? backend.kind.toUpperCase() : 'non chargé'})\nEn ligne depuis : ${uptime()}\nMessages traités : ${done}\nTâches planifiées : ${tasks.length}`);
+    case '/statut': {
+      const brain = cfg.brain === 'local' ? (MODELS[cfg.model] || {}).name + ' (local)' : cfg.orModel;
+      return send(chatId, `Cerveau : ${brain}\nPython : ${$('sPy').textContent}\nEn ligne depuis : ${uptime()}\nMessages traités : ${done}\nTâches planifiées : ${tasks.length}`);
+    }
+    case '/scripts': {
+      try { const l = await getScripts(true); return send(chatId, l.map(s => `${s.name} — ${s.description}${s.args ? '\n   arguments : ' + s.args : ''}`).join('\n\n')); }
+      catch (e) { return send(chatId, 'Impossible de lire la liste : ' + e.message); }
+    }
+    case '/run': {
+      const [name, ...args] = arg.split(/\s+/).filter(Boolean);
+      if (!name) return send(chatId, 'Format : /run nom [arguments]');
+      const t0 = performance.now();
+      const r = await withTyping(chatId, () => runScript(name, args));
+      done++; $('sDone').textContent = done;
+      return send(chatId, (r.ok ? '' : 'Erreur :\n') + clip(r.out.trim() || '(aucune sortie)', 12000) + `\n\n— ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    }
+    case '/py': {
+      if (!arg) return send(chatId, 'Format : /py code');
+      const r = await withTyping(chatId, () => runPython(arg));
+      done++; $('sDone').textContent = done;
+      return send(chatId, (r.ok ? '' : 'Erreur :\n') + clip(r.out.trim() || '(aucune sortie)', 12000));
+    }
     case '/tache': {
-      const m = arg.match(/^(\d{1,2}):(\d{2})\s+(.+)$/s);
+      const m = arg.match(/^(\d{1,2}):(\d{2})\s+([\s\S]+)$/);
       if (!m) return send(chatId, 'Format : /tache HH:MM consigne');
       const time = m[1].padStart(2, '0') + ':' + m[2];
-      const task = { time, prompt: m[3], lastRun: time <= hhmm() ? today() : '' };
-      tasks.push(task); store.set('tasks', tasks); refreshTasks();
+      tasks.push({ time, prompt: m[3], lastRun: time <= hhmm() ? today() : '' });
+      store.set('tasks', tasks); refreshTasks();
       return send(chatId, `Tâche ajoutée, chaque jour à ${time}.`);
     }
     case '/taches':
@@ -316,19 +538,21 @@ async function command(chatId, text){
   }
 }
 
-/* ---------- tâches planifiées ---------- */
+/* ================= tâches planifiées ================= */
 const pad = n => String(n).padStart(2, '0');
 const hhmm = () => { const d = new Date(); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
 const today = () => new Date().toLocaleDateString('sv-SE');
 function refreshTasks(){ $('sTasks').textContent = store.get('tasks', []).length; }
 async function runTask(task){
   log('Tâche planifiée : ' + task.prompt.slice(0, 60));
-  const answer = await withTyping(cfg.owner, () => ask([{ role: 'user', content: task.prompt }], 900));
-  await send(cfg.owner, `Tâche de ${task.time}\n\n${answer}`);
+  try {
+    const { text, used } = await withTyping(cfg.owner, () => think([{ role: 'user', content: task.prompt }]));
+    await send(cfg.owner, `Tâche de ${task.time}\n\n${text}${footer(used)}`);
+  } catch (e) { log(e.message, 'err'); await send(cfg.owner, `Tâche de ${task.time} : erreur — ${e.message}`); }
   done++; $('sDone').textContent = done;
 }
 function scheduler(){
-  if (!running || !engine || !cfg.owner) return;
+  if (!running || !cfg.owner) return;
   const tasks = store.get('tasks', []), now = hhmm(), d = today();
   let changed = false;
   for (const t of tasks) if (t.lastRun !== d && t.time <= now) { t.lastRun = d; changed = true; enqueue(() => runTask(t)); }
@@ -336,7 +560,7 @@ function scheduler(){
 }
 setInterval(scheduler, 20000);
 
-/* ---------- démarrage ---------- */
+/* ================= démarrage ================= */
 function uptime(){
   if (!startedAt) return '—';
   const s = Math.floor((Date.now() - startedAt) / 1000);
@@ -347,32 +571,37 @@ setInterval(() => $('sUp').textContent = uptime(), 30000);
 async function start(){
   saveCfg();
   if (!cfg.token) { log('Ajoute d\'abord le jeton du bot.', 'err'); return; }
+  if (cfg.brain !== 'local' && !cfg.orKey) { log('Ajoute ta clé API OpenRouter.', 'err'); return; }
   $('start').disabled = true; keepAwake();
   try {
-    if (!engine) await loadModel();
+    if (cfg.brain === 'local') await loadLocal();
+    else setState('dModel','sModel', cfg.orModel, 'ok');
     running = true; startedAt = startedAt || Date.now(); $('sUp').textContent = uptime();
     refreshTasks();
     log('Écoute de Telegram démarrée.', 'ok');
     pollLoop();
   } catch (e) {
-    setState('dModel','sModel','erreur','err'); log(e.message, 'err'); $('start').disabled = false;
+    log(e.message, 'err'); $('start').disabled = false;
   }
 }
 $('start').onclick = start;
 
-$('ask').onclick = async () => {
+async function testHere(){
   const q = $('q').value.trim(); if (!q) return;
   saveCfg();
+  $('ask').disabled = true; $('reply').textContent = 'Réflexion…';
+  const t0 = performance.now();
   try {
-    if (!engine) await loadModel();
-    $('reply').textContent = 'Réflexion…';
-    const t0 = performance.now();
-    try { $('reply').textContent = await ask([{ role: 'user', content: q }]); }
-    catch (err) { engine = null; setState('dModel','sModel','perdu, recharge','err'); throw err; }
-    log(`Test local : ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+    const { text, used } = await think([{ role: 'user', content: q }]);
+    $('reply').textContent = text + footer(used);
+    log(`Test : ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
   } catch (e) { $('reply').textContent = ''; log(e.message, 'err'); }
-};
+  $('ask').disabled = false;
+}
+$('ask').onclick = testHere;
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter') testHere(); });
 
+window.noeud = { runPython, runScript, agent, getScripts };
 refreshTasks();
 if (cfg.auto && cfg.token) { log('Démarrage automatique…'); start(); }
 </script>
