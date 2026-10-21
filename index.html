@@ -450,6 +450,8 @@ Commandes directes (sans IA) :
 /py code — exécuter du Python (ex. /py print(2**100))
 
 Gestion :
+/cle sk-or-… — enregistrer ta clé OpenRouter sur l'iPad
+/modele id — changer de modèle OpenRouter
 /statut — état du nœud
 /reset — effacer la mémoire de conversation
 /tache HH:MM consigne — tâche quotidienne (ex. /tache 08:00 Lance prix_crypto et résume la tendance)
@@ -464,7 +466,7 @@ async function handle(msg){
     log('Identifiant communiqué au chat ' + chatId + '.', 'warn'); return;
   }
   if (String(chatId) !== String(cfg.owner)) { log('Message ignoré : chat non autorisé (' + chatId + ').', 'warn'); return; }
-  if (text.startsWith('/')) return command(chatId, text);
+  if (text.startsWith('/')) return command(chatId, text, msg.message_id);
 
   const hist = store.get('hist', []);
   hist.push({ role: 'user', content: text });
@@ -483,13 +485,28 @@ async function handle(msg){
   done++; $('sDone').textContent = done;
 }
 
-async function command(chatId, text){
+async function command(chatId, text, msgId){
   const sp = text.indexOf(' ');
   const cmd = (sp < 0 ? text : text.slice(0, sp)).split('@')[0].toLowerCase();
   const arg = sp < 0 ? '' : text.slice(sp + 1).trim();
   const tasks = store.get('tasks', []);
   switch (cmd) {
     case '/start': case '/aide': case '/help': return send(chatId, HELP);
+    case '/cle': {
+      if (msgId) tg('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+      if (!/^sk-or-[\w-]{20,}$/.test(arg)) return send(chatId, 'Format : /cle sk-or-v1-…  (ta clé OpenRouter)');
+      cfg.orKey = arg; cfg.brain = 'openrouter'; store.set('cfg', cfg);
+      $('orKey').value = arg; $('brain').value = 'openrouter'; applyBrainClass();
+      setState('dModel','sModel', cfg.orModel, 'ok');
+      log('Clé OpenRouter enregistrée depuis Telegram.', 'ok');
+      return send(chatId, `Clé enregistrée sur l'iPad (…${arg.slice(-4)}) et ton message a été effacé. Cerveau : ${cfg.orModel}.`);
+    }
+    case '/modele': {
+      if (!arg) return send(chatId, `Modèle actuel : ${cfg.orModel}\nPour changer : /modele identifiant (ex. /modele minimax/minimax-m3.1-flash:free)`);
+      cfg.orModel = arg; store.set('cfg', cfg); $('orModel').value = arg;
+      if (cfg.orKey) setState('dModel','sModel', arg, 'ok');
+      return send(chatId, 'Modèle OpenRouter : ' + arg);
+    }
     case '/reset': store.set('hist', []); return send(chatId, 'Mémoire de conversation effacée.');
     case '/statut': {
       const brain = cfg.brain === 'local' ? (MODELS[cfg.model] || {}).name + ' (local)' : cfg.orModel;
@@ -571,11 +588,11 @@ setInterval(() => $('sUp').textContent = uptime(), 30000);
 async function start(){
   saveCfg();
   if (!cfg.token) { log('Ajoute d\'abord le jeton du bot.', 'err'); return; }
-  if (cfg.brain !== 'local' && !cfg.orKey) { log('Ajoute ta clé API OpenRouter.', 'err'); return; }
+  if (cfg.brain !== 'local' && !cfg.orKey) log('Pas encore de clé OpenRouter : envoie /cle sk-or-… au bot depuis ton téléphone.', 'warn');
   $('start').disabled = true; keepAwake();
   try {
     if (cfg.brain === 'local') await loadLocal();
-    else setState('dModel','sModel', cfg.orModel, 'ok');
+    else setState('dModel','sModel', cfg.orKey ? cfg.orModel : 'clé OpenRouter manquante', cfg.orKey ? 'ok' : 'warn');
     running = true; startedAt = startedAt || Date.now(); $('sUp').textContent = uptime();
     refreshTasks();
     log('Écoute de Telegram démarrée.', 'ok');
