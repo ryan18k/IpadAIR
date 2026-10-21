@@ -35,6 +35,13 @@ button:disabled{opacity:.5}
 #log{height:260px;overflow:auto;font:12.5px/1.5 ui-monospace,Menlo,monospace;background:#0b0e13;border-radius:8px;padding:10px;white-space:pre-wrap}
 #reply{white-space:pre-wrap;margin-top:10px;color:var(--text);max-height:340px;overflow:auto}
 .hint{font-size:13px;color:var(--muted);margin-top:8px}
+.files{margin-top:8px}
+.file{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);font-size:14px}
+.file:last-child{border:0}
+.file .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file button{padding:5px 10px;font-size:13px}
+.out a{display:inline-block;margin:6px 8px 0 0;color:var(--acc)}
+input[type=file]{padding:7px}
 .local-only{display:none}
 body.brain-local .local-only{display:block}
 body.brain-local .or-only{display:none}
@@ -115,6 +122,14 @@ body.brain-local .or-only{display:none}
     <h2>Tester ici</h2>
     <div class="row"><input id="q" placeholder="Ex. : calcule les 20 premiers nombres premiers en Python"><button class="ghost" id="ask">Envoyer</button></div>
     <div id="reply"></div>
+    <div class="out" id="outLinks"></div>
+  </div>
+
+  <div class="card">
+    <h2>Fichiers</h2>
+    <input type="file" id="upload" multiple>
+    <div class="hint">Les .py peuvent être exécutés ; les autres fichiers (CSV, JSON, texte…) sont lisibles par Python et par l'agent. Tu peux aussi les envoyer au bot depuis ton téléphone.</div>
+    <div class="files" id="fileList"></div>
   </div>
 
   <div class="card">
@@ -213,13 +228,32 @@ const loaded = new Set();
 async function boot(){
   importScripts('${PYODIDE}pyodide.js');
   py = await loadPyodide({ indexURL: '${PYODIDE}' });
+  for (const d of ['/home/pyodide/fichiers', '/home/pyodide/sortie']) { try { py.FS.mkdirTree(d); } catch (_) {} }
+  py.runPython("import os; os.chdir('/home/pyodide/fichiers')");
+}
+function clearOut(){
+  for (const f of py.FS.readdir('/home/pyodide/sortie')) if (f !== '.' && f !== '..') { try { py.FS.unlink('/home/pyodide/sortie/' + f); } catch (_) {} }
+}
+function collectOut(){
+  const files = [];
+  for (const f of py.FS.readdir('/home/pyodide/sortie')) {
+    if (f === '.' || f === '..') continue;
+    const path = '/home/pyodide/sortie/' + f;
+    try { if (py.FS.isFile(py.FS.stat(path).mode)) files.push({ name: f, data: py.FS.readFile(path) }); } catch (_) {}
+  }
+  clearOut();
+  return files;
 }
 self.onmessage = async (e) => {
-  const { id, code } = e.data;
+  const { id, code, write, remove } = e.data;
   let out = '';
   const t0 = performance.now();
   try {
     if (!py) { await boot(); self.postMessage({ id: 0, booted: true, ms: performance.now() - t0 }); }
+    for (const f of (write || [])) py.FS.writeFile('/home/pyodide/fichiers/' + f.name, f.data);
+    for (const n of (remove || [])) { try { py.FS.unlink('/home/pyodide/fichiers/' + n); } catch (_) {} }
+    if (code === null) { self.postMessage({ id, ok: true, out: '' }); return; }
+    clearOut();
     py.setStdout({ batched: s => { out += s + '\\n'; } });
     py.setStderr({ batched: s => { out += s + '\\n'; } });
     let imps = [];
@@ -231,19 +265,73 @@ self.onmessage = async (e) => {
       try { await py.loadPackage(ALIAS[name] || name, { messageCallback: () => {}, errorCallback: () => {} }); } catch (_) {}
     }
     const g = py.globals.get('dict')();
+    g.set('FICHIERS', '/home/pyodide/fichiers'); g.set('SORTIE', '/home/pyodide/sortie');
     let r;
     try { r = await py.runPythonAsync(code, { globals: g }); }
     finally { g.destroy(); }
     if (r !== undefined && r !== null) { out += String(r); if (r && r.destroy) r.destroy(); }
-    self.postMessage({ id, ok: true, out });
+    self.postMessage({ id, ok: true, out, files: collectOut() });
   } catch (err) {
-    self.postMessage({ id, ok: false, out: out + String((err && err.message) || err) });
+    let files = []; try { files = collectOut(); } catch (_) {}
+    self.postMessage({ id, ok: false, out: out + String((err && err.message) || err), files });
   }
 };`;
 let pyWorker = null, pySeq = 0;
 const pyReqs = new Map();
+
+/* --- fichiers persistants (IndexedDB) --- */
+const files = new Map();            // nom -> Uint8Array
+let workerHas = new Map();          // nom -> octets envoyés au worker
+let outbox = [];                    // fichiers produits par la dernière exécution
+const idb = (() => {
+  let dbp = null;
+  const open = () => dbp || (dbp = new Promise((res, rej) => {
+    const r = indexedDB.open('noeud-fichiers', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('f');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+  const tx = async (mode, fn) => { const db = await open(); return new Promise((res, rej) => { const t = db.transaction('f', mode); const r = fn(t.objectStore('f')); t.oncomplete = () => res(r && r.result); t.onerror = () => rej(t.error); }); };
+  return {
+    put: (k, v) => tx('readwrite', s => s.put(v, k)).catch(() => {}),
+    del: k => tx('readwrite', s => s.delete(k)).catch(() => {}),
+    all: async () => { try { const db = await open(); return await new Promise(res => { const out = []; const c = db.transaction('f').objectStore('f').openCursor(); c.onsuccess = () => { const cur = c.result; if (cur) { out.push([cur.key, cur.value]); cur.continue(); } else res(out); }; c.onerror = () => res(out); }); } catch { return []; } },
+  };
+})();
+const safeName = n => (String(n || 'fichier').split(/[\\/]/).pop().replace(/[^\w.\-]+/g, '_').slice(0, 80)) || 'fichier';
+const human = b => b < 1024 ? b + ' o' : b < 1048576 ? (b / 1024).toFixed(1) + ' Ko' : (b / 1048576).toFixed(1) + ' Mo';
+async function addFile(name, data){
+  name = safeName(name);
+  files.set(name, data); await idb.put(name, data); renderFiles();
+  log(`Fichier ajouté : ${name} (${human(data.length)})`, 'ok');
+  return name;
+}
+async function removeFile(name){
+  if (!files.has(name)) return false;
+  files.delete(name); await idb.del(name); renderFiles(); return true;
+}
+function fileListText(){
+  return files.size ? [...files].map(([n, d]) => `${n} (${human(d.length)})`).join('\n') : '';
+}
+function renderFiles(){
+  const box = $('fileList'); box.innerHTML = '';
+  if (!files.size) { box.innerHTML = '<div class="hint">Aucun fichier.</div>'; return; }
+  for (const [n, d] of files) {
+    const row = document.createElement('div'); row.className = 'file';
+    const label = document.createElement('span'); label.className = 'name'; label.textContent = `${n} · ${human(d.length)}`;
+    const btns = document.createElement('span'); btns.className = 'row';
+    if (n.endsWith('.py')) { const b = document.createElement('button'); b.className = 'ghost'; b.textContent = 'Exécuter'; b.onclick = () => runFileHere(n); btns.appendChild(b); }
+    const x = document.createElement('button'); x.className = 'ghost'; x.textContent = 'Supprimer'; x.onclick = () => removeFile(n); btns.appendChild(x);
+    row.append(label, btns); box.appendChild(row);
+  }
+}
+$('upload').onchange = async e => {
+  for (const f of e.target.files) await addFile(f.name, new Uint8Array(await f.arrayBuffer()));
+  e.target.value = '';
+};
+idb.all().then(list => { for (const [k, v] of list) files.set(k, v instanceof Uint8Array ? v : new Uint8Array(v)); renderFiles(); });
 function startPy(){
   pyWorker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })));
+  workerHas = new Map();
   pyWorker.onmessage = e => {
     if (e.data.booted) { setState('dPy','sPy','prêt','ok'); log(`Python prêt (${(e.data.ms / 1000).toFixed(1)} s).`, 'ok'); return; }
     const r = pyReqs.get(e.data.id); if (r) { pyReqs.delete(e.data.id); r(e.data); }
@@ -258,11 +346,46 @@ function runPython(code, timeoutMs = 120000){
     const t = setTimeout(() => {
       pyReqs.delete(id); pyWorker.terminate(); pyWorker = null;
       setState('dPy','sPy','redémarré après délai','warn');
+      workerHas = new Map();
       resolve({ ok: false, out: `Délai dépassé (${timeoutMs / 1000} s) : exécution interrompue.` });
     }, timeoutMs);
-    pyReqs.set(id, r => { clearTimeout(t); resolve(r); });
-    pyWorker.postMessage({ id, code });
+    pyReqs.set(id, r => {
+      clearTimeout(t);
+      for (const f of (r.files || [])) outbox.push(f);
+      resolve(r);
+    });
+    const write = [], remove = [];
+    for (const [n, d] of files) if (workerHas.get(n) !== d) { write.push({ name: n, data: d }); workerHas.set(n, d); }
+    for (const n of [...workerHas.keys()]) if (!files.has(n)) { remove.push(n); workerHas.delete(n); }
+    pyWorker.postMessage({ id, code, write, remove });
   });
+}
+
+async function runFile(name, args = []){
+  if (!files.has(name)) {
+    const guess = [...files.keys()].find(k => k === name + '.py');
+    if (!guess) return { ok: false, out: `Fichier « ${name} » introuvable. Fichiers : ${[...files.keys()].join(', ') || 'aucun'}` };
+    name = guess;
+  }
+  const src = new TextDecoder().decode(files.get(name));
+  const prelude = `import json as __j, sys as __s\nARGS = __j.loads(${JSON.stringify(JSON.stringify(args.map(String)))})\n__s.argv = [${JSON.stringify(name)}] + ARGS\n`;
+  log(`Exécution de ${name} ${args.join(' ')}`);
+  return runPython(prelude + src + '\npass\n', 300000);
+}
+function showOutputs(){
+  const box = $('outLinks'); box.innerHTML = '';
+  for (const f of outbox) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([f.data])); a.download = f.name; a.textContent = '⬇ ' + f.name;
+    box.appendChild(a);
+  }
+  outbox = [];
+}
+async function runFileHere(name){
+  $('reply').textContent = 'Exécution de ' + name + '…'; outbox = [];
+  const r = await runFile(name);
+  $('reply').textContent = (r.ok ? '' : 'Erreur :\n') + (r.out.trim() || '(aucune sortie)');
+  showOutputs();
 }
 
 /* ================= scripts prédéfinis ================= */
@@ -283,18 +406,22 @@ async function runScript(name, args = []){
   const src = await r.text();
   const prelude = `import json as __j\nARGS = __j.loads(${JSON.stringify(JSON.stringify(args.map(String)))})\n`;
   log(`Script ${name} ${args.join(' ')}`);
-  return runPython(prelude + src, (s.timeout || 120) * 1000);
+  return runPython(prelude + src + '\npass\n', (s.timeout || 120) * 1000);
 }
 
 /* ================= outils de l'agent ================= */
 const TOOLS = [
   { type: 'function', function: {
     name: 'run_python',
-    description: "Exécute du code Python 3 (Pyodide, dans le navigateur de l'iPad) et renvoie la sortie. Utilise print() pour afficher les résultats. Le await est autorisé au niveau supérieur. Pour le réseau, utilise `from pyodide.http import pyfetch` (r = await pyfetch(url); data = await r.json()) ; seules les API qui autorisent les navigateurs (CORS) répondent. Paquets disponibles à l'import : numpy, pandas, matplotlib, scipy, etc. Pas d'accès aux fichiers de l'utilisateur ni au shell.",
+    description: "Exécute du code Python 3 (Pyodide, dans le navigateur de l'iPad) et renvoie la sortie. Utilise print() pour afficher les résultats. Le await est autorisé au niveau supérieur. Pour le réseau, utilise `from pyodide.http import pyfetch` (r = await pyfetch(url); data = await r.json()) ; seules les API qui autorisent les navigateurs (CORS) répondent. Paquets disponibles à l'import : numpy, pandas, matplotlib, scipy, etc. Le dossier courant contient les fichiers que l'utilisateur a envoyés (lis-les avec open('nom')). Pour renvoyer un fichier à l'utilisateur (image, CSV, graphique…), enregistre-le dans le dossier SORTIE, ex. plt.savefig(SORTIE + '/graphique.png') ; il lui sera transmis automatiquement. Pas de shell.",
     parameters: { type: 'object', properties: { code: { type: 'string', description: 'Code Python à exécuter' } }, required: ['code'] } } },
   { type: 'function', function: {
     name: 'run_script',
     description: "Lance un script Python prédéfini par l'utilisateur, par son nom, avec des arguments facultatifs. Préfère cet outil quand un script existant correspond à la demande.",
+    parameters: { type: 'object', properties: { name: { type: 'string' }, args: { type: 'array', items: { type: 'string' } } }, required: ['name'] } } },
+  { type: 'function', function: {
+    name: 'run_file',
+    description: "Exécute un fichier .py envoyé par l'utilisateur (présent dans ses fichiers), avec des arguments facultatifs.",
     parameters: { type: 'object', properties: { name: { type: 'string' }, args: { type: 'array', items: { type: 'string' } } }, required: ['name'] } } },
   { type: 'function', function: {
     name: 'fetch_url',
@@ -304,6 +431,7 @@ const TOOLS = [
 async function runTool(name, args){
   try {
     if (name === 'run_python') { const r = await runPython(args.code || ''); return (r.ok ? '' : 'ERREUR\n') + (r.out.trim() || '(aucune sortie)'); }
+    if (name === 'run_file') { const r = await runFile(args.name, args.args || []); return (r.ok ? '' : 'ERREUR\n') + (r.out.trim() || '(aucune sortie)'); }
     if (name === 'run_script') { const r = await runScript(args.name, args.args || []); return (r.ok ? '' : 'ERREUR\n') + (r.out.trim() || '(aucune sortie)'); }
     if (name === 'fetch_url') {
       const r = await fetch(args.url);
@@ -361,7 +489,9 @@ Tu disposes d'outils : run_python (exécuter du Python), run_script (scripts pr�
 Utilise-les dès qu'un calcul, une donnée à jour ou une vérification est nécessaire, plutôt que de deviner. N'invente jamais un résultat que tu n'as pas obtenu.
 Réponds en français, de façon claire et concise, en texte simple adapté à Telegram (pas de tableaux Markdown).
 Scripts prédéfinis disponibles :
-${scripts || '(aucun)'}${extra ? '\n\nConsignes de l\'utilisateur :\n' + extra : ''}`;
+${scripts || '(aucun)'}
+Fichiers de l'utilisateur (dans le dossier courant de Python) :
+${fileListText() || '(aucun)'}${extra ? '\n\nConsignes de l\'utilisateur :\n' + extra : ''}`;
 }
 
 async function agent(history){
@@ -381,7 +511,7 @@ async function agent(history){
         let args = {}; try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
         log('Outil : ' + tc.function.name + (args.name ? ' ' + args.name : ''));
         const res = await runTool(tc.function.name, args);
-        used.push(tc.function.name === 'run_script' ? 'script ' + args.name : tc.function.name);
+        used.push(['run_script', 'run_file'].includes(tc.function.name) ? (tc.function.name === 'run_file' ? 'fichier ' : 'script ') + args.name : tc.function.name);
         msgs.push({ role: 'tool', tool_call_id: tc.id, content: clip(res, 8000) });
       }
       continue;
@@ -451,6 +581,25 @@ async function send(chatId, text){
   text = String(text || '(vide)').replace(/\*\*([^*\n]+)\*\*/g, '$1').replace(/^#{1,6}\s+/gm, '');
   for (let i = 0; i < text.length; i += 4000) await tg('sendMessage', { chat_id: chatId, text: text.slice(i, i + 4000) });
 }
+async function sendFiles(chatId, list){
+  for (const f of list) {
+    const fd = new FormData();
+    fd.append('chat_id', String(chatId));
+    fd.append('document', new Blob([f.data]), f.name);
+    try {
+      const r = await (await fetch(`https://api.telegram.org/bot${cfg.token}/sendDocument`, { method: 'POST', body: fd })).json();
+      if (!r.ok) log('Envoi de ' + f.name + ' : ' + r.description, 'err');
+    } catch (e) { log('Envoi de ' + f.name + ' : ' + e.message, 'err'); }
+  }
+}
+async function flushOutbox(chatId){ const list = outbox; outbox = []; if (list.length) { log(`${list.length} fichier(s) renvoyé(s).`); await sendFiles(chatId, list); } }
+async function downloadTgFile(fileId){
+  const info = await tg('getFile', { file_id: fileId });
+  if (!info.ok) throw new Error(info.description || 'getFile a échoué (fichier > 20 Mo ?)');
+  const r = await fetch(`https://api.telegram.org/file/bot${cfg.token}/${info.result.file_path}`);
+  if (!r.ok) throw new Error('téléchargement HTTP ' + r.status);
+  return new Uint8Array(await r.arrayBuffer());
+}
 async function withTyping(chatId, fn){
   const tick = () => tg('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
   tick(); const t = setInterval(tick, 4500);
@@ -466,7 +615,7 @@ async function pollLoop(){
       setState('dNet','sNet','connecté','ok'); backoff = 2000;
       for (const u of res.result) {
         offset = u.update_id + 1; store.set('offset', offset);
-        if (u.message && typeof u.message.text === 'string') enqueue(() => handle(u.message));
+        if (u.message && (typeof u.message.text === 'string' || u.message.document || u.message.photo)) enqueue(() => handle(u.message));
       }
     } catch (e) {
       setState('dNet','sNet','hors ligne, nouvel essai','err');
@@ -483,6 +632,12 @@ Commandes directes (sans IA) :
 /run nom [arguments] — lancer un script (ex. /run prix_crypto bitcoin solana)
 /py code — exécuter du Python (ex. /py print(2**100))
 
+Fichiers :
+Envoie un fichier au bot (trombone → Fichier). Un .py est exécuté aussitôt (la légende sert d'arguments) ; les autres sont gardés pour Python et l'agent. Ajoute une légende pour poser une question sur le fichier.
+/fichiers — lister les fichiers
+/exec nom.py [arguments] — exécuter un fichier envoyé
+/effacer nom — supprimer un fichier
+
 Gestion :
 /cle sk-or-… — enregistrer ta clé OpenRouter sur l'iPad
 /modele id — changer de modèle OpenRouter
@@ -494,13 +649,34 @@ Gestion :
 /lancer N — exécuter la tâche N maintenant`;
 
 async function handle(msg){
-  const chatId = msg.chat.id, text = msg.text.trim();
+  const chatId = msg.chat.id;
+  let text = (msg.text || msg.caption || '').trim();
   if (!cfg.owner) {
     await send(chatId, `Ton identifiant de chat est ${chatId}. Colle-le dans le champ « Chat autorisé » sur l'iPad, puis touche Enregistrer.`);
     log('Identifiant communiqué au chat ' + chatId + '.', 'warn'); return;
   }
   if (String(chatId) !== String(cfg.owner)) { log('Message ignoré : chat non autorisé (' + chatId + ').', 'warn'); return; }
-  if (text.startsWith('/')) return command(chatId, text, msg.message_id);
+
+  if (msg.document || msg.photo) {
+    let name;
+    try {
+      const doc = msg.document || { file_id: msg.photo[msg.photo.length - 1].file_id, file_name: `photo_${msg.message_id}.jpg` };
+      const data = await withTyping(chatId, () => downloadTgFile(doc.file_id));
+      name = await addFile(doc.file_name || `fichier_${msg.message_id}`, data);
+    } catch (e) { log('Réception du fichier : ' + e.message, 'err'); return send(chatId, 'Impossible de récupérer le fichier : ' + e.message); }
+    if (name.endsWith('.py')) {
+      outbox = [];
+      const r = await withTyping(chatId, () => runFile(name, text ? text.split(/\s+/) : []));
+      done++; $('sDone').textContent = done;
+      await send(chatId, `${name}\n\n` + (r.ok ? '' : 'Erreur :\n') + clip(r.out.trim() || '(aucune sortie)', 12000));
+      return flushOutbox(chatId);
+    }
+    if (!text) return send(chatId, `Fichier enregistré : ${name} (${human(files.get(name).length)}). Pose-moi une question à son sujet, ou utilise /fichiers.`);
+    text = `Fichier reçu : ${name}. ${text}`;
+  }
+  if (!text) return;
+  if (text.startsWith('/')) { outbox = []; await command(chatId, text, msg.message_id); return flushOutbox(chatId); }
+  outbox = [];
 
   const hist = store.get('hist', []);
   hist.push({ role: 'user', content: text });
@@ -511,6 +687,7 @@ async function handle(msg){
     ctx.push({ role: 'assistant', content: answer });
     store.set('hist', ctx.slice(-12));
     await send(chatId, answer + footer(used));
+    await flushOutbox(chatId);
     log(`Réponse envoyée en ${((performance.now() - t0) / 1000).toFixed(1)} s.`, 'ok');
   } catch (e) {
     log(e.message, 'err');
@@ -558,6 +735,17 @@ async function command(chatId, text, msgId){
       done++; $('sDone').textContent = done;
       return send(chatId, (r.ok ? '' : 'Erreur :\n') + clip(r.out.trim() || '(aucune sortie)', 12000) + `\n\n— ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     }
+    case '/fichiers':
+      return send(chatId, fileListText() || 'Aucun fichier. Envoie-en un au bot (trombone → Fichier).');
+    case '/exec': {
+      const [name, ...args] = arg.split(/\s+/).filter(Boolean);
+      if (!name) return send(chatId, 'Format : /exec nom.py [arguments]');
+      const r = await withTyping(chatId, () => runFile(name, args));
+      done++; $('sDone').textContent = done;
+      return send(chatId, (r.ok ? '' : 'Erreur :\n') + clip(r.out.trim() || '(aucune sortie)', 12000));
+    }
+    case '/effacer':
+      return send(chatId, (await removeFile(safeName(arg))) ? 'Fichier supprimé.' : 'Fichier introuvable.');
     case '/py': {
       if (!arg) return send(chatId, 'Format : /py code');
       const r = await withTyping(chatId, () => runPython(arg));
@@ -596,9 +784,11 @@ const today = () => new Date().toLocaleDateString('sv-SE');
 function refreshTasks(){ $('sTasks').textContent = store.get('tasks', []).length; }
 async function runTask(task){
   log('Tâche planifiée : ' + task.prompt.slice(0, 60));
+  outbox = [];
   try {
     const { text, used } = await withTyping(cfg.owner, () => think([{ role: 'user', content: task.prompt }]));
     await send(cfg.owner, `Tâche de ${task.time}\n\n${text}${footer(used)}`);
+    await flushOutbox(cfg.owner);
   } catch (e) { log(e.message, 'err'); await send(cfg.owner, `Tâche de ${task.time} : erreur — ${e.message}`); }
   done++; $('sDone').textContent = done;
 }
@@ -640,11 +830,12 @@ $('start').onclick = start;
 async function testHere(){
   const q = $('q').value.trim(); if (!q) return;
   saveCfg();
-  $('ask').disabled = true; $('reply').textContent = 'Réflexion…';
+  $('ask').disabled = true; $('reply').textContent = 'Réflexion…'; outbox = [];
   const t0 = performance.now();
   try {
     const { text, used } = await think([{ role: 'user', content: q }]);
     $('reply').textContent = text + footer(used);
+    showOutputs();
     log(`Test : ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
   } catch (e) { $('reply').textContent = ''; log(e.message, 'err'); }
   $('ask').disabled = false;
@@ -652,7 +843,7 @@ async function testHere(){
 $('ask').onclick = testHere;
 $('q').addEventListener('keydown', e => { if (e.key === 'Enter') testHere(); });
 
-window.noeud = { runPython, runScript, agent, getScripts };
+window.noeud = { runPython, runScript, runFile, addFile, agent, getScripts, files, get outbox(){ return outbox; } };
 refreshTasks();
 if (cfg.auto && cfg.token) { log('Démarrage automatique…'); start(); }
 </script>
