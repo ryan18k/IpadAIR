@@ -77,12 +77,12 @@ body.brain-local .or-only{display:none}
       <label>Modèle OpenRouter (les « :free » sont gratuits)</label>
       <input id="orModel" list="orModels" autocomplete="off" spellcheck="false">
       <datalist id="orModels">
-        <option value="nvidia/nemotron-3-super-120b-a12b:free">
-        <option value="minimax/minimax-m3.1-flash:free">
-        <option value="google/gemma-4-31b-it:free">
         <option value="nvidia/nemotron-3-ultra-550b-a55b:free">
-        <option value="thinkingmachines/inkling:free">
+        <option value="minimax/minimax-m3.1-flash:free">
+        <option value="nvidia/nemotron-3.5-super-vl:free">
         <option value="cohere/north-mini-code:free">
+        <option value="nvidia/nemotron-3.5-lightning:free">
+        <option value="dots-studio/dots-3-note-preview:free">
       </datalist>
     </div>
 
@@ -154,11 +154,20 @@ const MODELS = {
   q15: { name: "Qwen 2.5 1,5 Md", mlc: "Qwen2.5-1.5B-Instruct", hf: "Qwen/Qwen2.5-1.5B-Instruct-GGUF" },
   l3:  { name: "Llama 3.2 3 Md",  mlc: "Llama-3.2-3B-Instruct", hf: null },
 };
-const DEFAULT_OR_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
+const OR_FALLBACKS = [
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'minimax/minimax-m3.1-flash:free',
+  'nvidia/nemotron-3.5-super-vl:free',
+  'cohere/north-mini-code:free',
+  'nvidia/nemotron-3.5-lightning:free',
+  'dots-studio/dots-3-note-preview:free',
+];
+const DEFAULT_OR_MODEL = OR_FALLBACKS[0];
 const cfg = store.get('cfg', {});
 const BUILTIN_OR_KEY = atob('NjVjMmRlY2QxMTA1ZTgzYjc4NWFkNTQzN2FmYjA1ZTZmY2UwMGZkYWZhNzE3ZjRiZDY5YzUzZThmMTFlOTI0ZS0xdi1yby1rcw==').split('').reverse().join('');
 if (!cfg.orKey) cfg.orKey = BUILTIN_OR_KEY;
 if (!MODELS[cfg.model]) cfg.model = 'q15';
+if (!cfg.orModel || cfg.orModel === 'nvidia/nemotron-3-super-120b-a12b:free') cfg.orModel = DEFAULT_OR_MODEL;
 $('token').value = cfg.token || '';
 $('owner').value = cfg.owner || '';
 $('brain').value = cfg.brain || 'openrouter';
@@ -305,18 +314,41 @@ async function runTool(name, args){
 }
 
 /* ================= cerveau OpenRouter ================= */
-async function orChat(messages, withTools){
-  const body = { model: cfg.orModel || DEFAULT_OR_MODEL, messages, max_tokens: 3000 };
+let activeModel = null; // modèle qui a fonctionné en dernier
+async function orOnce(model, messages, withTools){
+  const body = { model, messages, max_tokens: 3000 };
   if (withTools) { body.tools = TOOLS; body.tool_choice = 'auto'; }
   const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + cfg.orKey, 'Content-Type': 'application/json', 'X-Title': 'Noeud IA iPad' },
     body: JSON.stringify(body),
   });
-  let j; try { j = await r.json(); } catch { throw new Error('OpenRouter : réponse illisible (HTTP ' + r.status + ')'); }
-  if (!r.ok || j.error) throw new Error('OpenRouter : ' + ((j.error && (j.error.message || JSON.stringify(j.error))) || 'HTTP ' + r.status));
-  if (!j.choices || !j.choices[0]) throw new Error('OpenRouter : réponse vide');
+  let j; try { j = await r.json(); } catch { j = {}; }
+  if (!r.ok || j.error || !j.choices || !j.choices[0]) {
+    const e = j.error || {};
+    const raw = e.metadata && e.metadata.raw ? ' — ' + String(e.metadata.raw).slice(0, 160) : '';
+    const err = new Error((e.message || 'HTTP ' + r.status) + raw);
+    err.status = e.code || r.status;
+    err.retryable = [402, 403, 404, 408, 429, 500, 502, 503, 504].includes(Number(err.status)) || /provider|rate|upstream|overload|unavailable/i.test(err.message);
+    throw err;
+  }
   return j.choices[0].message;
+}
+async function orChat(messages, withTools){
+  const order = [...new Set([activeModel, cfg.orModel || DEFAULT_OR_MODEL, ...OR_FALLBACKS].filter(Boolean))];
+  let last;
+  for (const model of order) {
+    try {
+      const m = await orOnce(model, messages, withTools);
+      if (model !== activeModel) { activeModel = model; setState('dModel','sModel', model, 'ok'); if (model !== (cfg.orModel || DEFAULT_OR_MODEL)) log('Bascule sur ' + model, 'warn'); }
+      return m;
+    } catch (e) {
+      last = e;
+      if (!e.retryable || /tool|function/i.test(e.message)) throw new Error('OpenRouter (' + model + ') : ' + e.message);
+      log(`${model} indisponible (${e.status}), essai du suivant…`, 'warn');
+    }
+  }
+  throw new Error('OpenRouter : tous les modèles gratuits sont saturés pour le moment (' + (last && last.message) + '). Réessaie dans quelques minutes.');
 }
 
 async function systemPrompt(){
@@ -416,7 +448,7 @@ async function tg(method, params = {}){
   return r.json();
 }
 async function send(chatId, text){
-  text = String(text || '(vide)');
+  text = String(text || '(vide)').replace(/\*\*([^*\n]+)\*\*/g, '$1').replace(/^#{1,6}\s+/gm, '');
   for (let i = 0; i < text.length; i += 4000) await tg('sendMessage', { chat_id: chatId, text: text.slice(i, i + 4000) });
 }
 async function withTyping(chatId, fn){
@@ -511,7 +543,7 @@ async function command(chatId, text, msgId){
     }
     case '/reset': store.set('hist', []); return send(chatId, 'Mémoire de conversation effacée.');
     case '/statut': {
-      const brain = cfg.brain === 'local' ? (MODELS[cfg.model] || {}).name + ' (local)' : cfg.orModel;
+      const brain = cfg.brain === 'local' ? (MODELS[cfg.model] || {}).name + ' (local)' : (activeModel || cfg.orModel) + (activeModel && activeModel !== cfg.orModel ? ' (secours)' : '');
       return send(chatId, `Cerveau : ${brain}\nPython : ${$('sPy').textContent}\nEn ligne depuis : ${uptime()}\nMessages traités : ${done}\nTâches planifiées : ${tasks.length}`);
     }
     case '/scripts': {
